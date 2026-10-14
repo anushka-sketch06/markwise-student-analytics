@@ -1,0 +1,58 @@
+# Python runtime files and virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.python-version
+
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+secrets/
+**/secrets/
+credentials*.json
+**/credentials*.json
+service-account*.json
+**/service-account*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local application data and generated exports
+instance/
+**/instance/
+backups/
+**/backups/
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*-wal
+*-shm
+*.bak
+*.backup
+*.bkp
+*.old
+/student_marks_results.csv
+*.csv
+*.xls
+*.xlsx
+private-data/
+**/private-data/
+student-data/
+**/student-data/
+exports/
+**/exports/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Operating system and editor metadata
+.DS_Store
+Thumbs.db
+.vscode/

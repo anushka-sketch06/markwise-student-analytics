@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Manage Markwise student profiles, classes, enrollments, and marks.">
+  <title>Markwise · Student Management</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="Student Marks Analyzer home"><span class="brand-icon">✳</span> markwise</a>
+    <span class="top-note">A simple classroom companion</span>
+  </header>
+
+  <main id="top" class="page-wrap">
+    <section class="intro">
+      <p class="eyebrow">MARKWISE SCHOOL RECORDS</p>
+      <h1>Student profiles<br><span>and enrollment.</span></h1>
+      <p class="intro-copy">Manage student information, academic years, classes, sections, and saved marks from one place.</p>
+      <div class="privacy-note"><span aria-hidden="true">●</span> Private by design <i></i> No account needed</div>
+    </section>
+
+    <aside id="backend-warning" class="backend-warning" role="status" hidden>
+      This preview opened Markwise as a file, so student records cannot be saved here. Start Flask, then open
+      <a href="http://127.0.0.1:5000/">http://127.0.0.1:5000/</a> to use the database-backed app.
+    </aside>
+
+    <section class="workspace" aria-label="Marks analyzer">
+      <form id="analyzer-form" class="entry-card">
+        <div class="card-heading">
+          <div><p class="eyebrow">SET UP YOUR CLASS</p><h2>Class details</h2></div>
+          <span class="step-badge">01</span>
+        </div>
+
+        <label class="field-label" for="pass-mark">Pass mark <span>Students need this average to pass</span></label>
+        <div class="pass-input"><input id="pass-mark" type="number" min="0" max="100" step="0.5" value="40" required><span>out of 100</span></div>
+
+        <div class="section-label"><span>Subjects</span><span id="subject-count">3 subjects</span></div>
+        <div id="subjects" class="subjects-list"></div>
+        <button id="add-subject" class="text-button" type="button">＋ Add a subject</button>
+
+        <div class="divider"></div>
+        <div class="card-heading student-heading">
+          <div><p class="eyebrow">CHOOSE SAVED RECORDS</p><h2>Students to analyze</h2></div>
+          <span class="step-badge">02</span>
+        </div>
+        <div id="student-entry" class="student-entry"></div>
+        <button id="add-student" class="secondary-button" type="button">＋ Add another student</button>
+        <button class="primary-button" type="submit">Analyze marks <span aria-hidden="true">→</span></button>
+        <p id="form-message" class="form-message" role="alert"></p>
+      </form>
+
+      <section id="results" class="results-panel" aria-live="polite">
+        <div class="empty-state">
+          <div class="empty-illustration" aria-hidden="true"><span class="sheet">▤</span><span class="sparkle">✦</span></div>
+          <p class="eyebrow">YOUR CLASS OVERVIEW</p>
+          <h2>Your results will<br>show up here.</h2>
+          <p>Enter at least one student and their marks, then select <strong>Analyze marks</strong> to see your class summary.</p>
+          <div class="empty-hint"><span>↳</span> Tip: add as many subjects as you need</div>
+        </div>
+      </section>
+    </section>
+
+    <section class="students-card" id="student-management" aria-labelledby="students-title">
+      <div class="card-heading students-card-heading">
+        <div><p class="eyebrow">SCHOOL RECORDS</p><h2 id="students-title">Students</h2></div>
+        <button id="new-student-button" class="secondary-button" type="button">＋ Add student</button>
+      </div>
+      <label class="search-field" for="student-search">Search students
+        <input id="student-search" type="search" placeholder="Name, student ID, or roll number" autocomplete="off">
+      </label>
+      <div class="student-filters">
+        <label>Academic year<select id="student-year-filter"><option value="">Current year</option></select></label>
+        <label>Class<select id="student-class-filter"><option value="">All classes</option></select></label>
+        <label>Section<select id="student-section-filter"><option value="">All sections</option></select></label>
+        <label>Status<select id="student-status-filter"><option value="">All active records</option><option value="active">Active</option><option value="completed">Completed</option><option value="transferred">Transferred</option></select></label>
+      </div>
+      <p id="student-list-message" class="list-message" role="status"></p>
+      <div class="table-wrap students-table-wrap">
+        <table class="results-table students-table">
+          <thead><tr><th scope="col">Student</th><th scope="col">Student ID</th><th scope="col">Admission no.</th><th scope="col">Class</th><th scope="col">Section</th><th scope="col">Roll no.</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+          <tbody id="student-list"></tbody>
+        </table>
+      </div>
+      <form id="student-form" class="student-form" hidden>
+        <div class="student-form-heading"><h3 id="student-form-title">Add a student</h3><p>Student ID is generated automatically if you leave it blank. Admission number is required.</p></div>
+        <input id="student-record-id" type="hidden">
+        <div class="student-fields">
+          <label>Student name<input id="student-name" name="name" maxlength="100" required></label>
+          <label>Student ID<input id="student-code" name="studentCode" maxlength="40"></label>
+          <label>Admission number<input id="student-admission" name="admissionNumber" maxlength="60" required></label>
+          <label>Roll number<input id="student-roll" name="rollNumber" maxlength="40"></label>
+          <label>Class<input id="student-class" name="className" maxlength="80"></label>
+          <label>Section<input id="student-section" name="sectionName" maxlength="80"></label>
+          <label>Guardian name<input id="guardian-name" name="guardianName" maxlength="100"></label>
+          <label>Guardian contact<input id="guardian-contact" name="guardianContact" type="tel" maxlength="40" autocomplete="tel"></label>
+          <label>Admission date<input id="admission-date" name="admissionDate" type="date"></label>
+          <label>Enrollment status<select id="enrollment-status" name="enrollmentStatus"><option value="active">Active</option><option value="completed">Completed</option><option value="transferred">Transferred</option></select></label>
+        </div>
+        <p id="student-form-error" class="form-message" role="alert"></p>
+        <div class="student-form-actions">
+          <button id="cancel-student-edit" class="text-button" type="button">Cancel</button>
+          <button class="primary-button" type="submit">Save student</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="students-card school-structure" id="class-management" aria-labelledby="classes-title">
+      <div class="card-heading students-card-heading"><div><p class="eyebrow">ACADEMIC ORGANIZATION</p><h2 id="classes-title">Academic years, classes &amp; sections</h2></div></div>
+      <div class="structure-grid">
+        <form id="academic-year-form" class="compact-form">
+          <h3>Academic year</h3>
+          <label>Year label<input name="label" maxlength="40" placeholder="2026–2027" required></label>
+          <div class="date-fields"><label>Starts<input name="startsOn" type="date"></label><label>Ends<input name="endsOn" type="date"></label></div>
+          <label class="checkbox-label"><input name="isCurrent" type="checkbox"> Make this the current year</label>
+          <button class="secondary-button" type="submit">Save academic year</button><p class="form-message" id="year-form-error" role="alert"></p>
+        </form>
+        <form id="class-form" class="compact-form">
+          <h3>Class</h3><label>Class name<input name="name" maxlength="80" placeholder="Grade 7" required></label>
+          <button class="secondary-button" type="submit">Add class</button><p class="form-message" id="class-form-error" role="alert"></p>
+        </form>
+        <form id="section-form" class="compact-form">
+          <h3>Section</h3><label>Class<select name="classId" required><option value="">Choose class</option></select></label>
+          <label>Section name<input name="name" maxlength="80" placeholder="Blue" required></label>
+          <button class="secondary-button" type="submit">Add section</button><p class="form-message" id="section-form-error" role="alert"></p>
+        </form>
+      </div>
+      <div class="structure-lists"><div><h3>Academic years</h3><ul id="academic-year-list" class="plain-list"></ul></div><div><h3>Classes and sections</h3><div id="class-list" class="class-list"></div></div></div>
+    </section>
+
+    <dialog id="student-dialog" class="student-dialog" aria-labelledby="student-dialog-title">
+      <button id="close-student-dialog" class="icon-button dialog-close" type="button" aria-label="Close student details">×</button>
+      <div id="student-details"></div>
+    </dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <footer>Made for learning <span>·</span> Student Marks Analyzer</footer>
+  </main>
+</body>
+</html>
