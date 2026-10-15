@@ -196,6 +196,156 @@ class MarkwiseAppTests(unittest.TestCase):
         self.assertEqual(latest["classAverage"], 61.25)
         self.assertEqual(latest["students"][0]["name"], "Asha Rao")
 
+    def test_dashboard_empty_state_and_invalid_filter_validation(self):
+        response = self.client.get("/api/dashboard/analytics")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["summary"]["totalActiveStudents"], 0)
+        self.assertIsNone(payload["summary"]["classAveragePercentage"])
+        self.assertIsNone(payload["summary"]["passPercentage"])
+        self.assertEqual(payload["summary"]["highestPerformers"], [])
+        self.assertEqual(payload["results"], [])
+        self.assertEqual(payload["passFailDistribution"], {"pass": 0, "fail": 0})
+        self.assertEqual(self.client.get("/api/dashboard/analytics?academicYearId=bad").status_code, 400)
+        self.assertEqual(self.client.get("/api/dashboard/analytics?sectionId=99999").status_code, 400)
+
+    def test_dashboard_calculates_valid_marks_boundaries_and_hides_private_fields(self):
+        first = self.add_student().get_json()["student"]
+        second = self.add_student(studentCode="S-101", admissionNumber="ADM-101",
+                                  name="Ben Das", rollNumber="13").get_json()["student"]
+        third = self.add_student(studentCode="S-102", admissionNumber="ADM-102",
+                                 name="Cara Shah", rollNumber="14").get_json()["student"]
+        saved = self.client.post("/api/analysis", json={
+            "passMark": 40, "subjects": ["Maths", "English"],
+            "students": [
+                {"id": first["id"], "marks": [40, 100]},
+                {"id": second["id"], "marks": [39, 40]},
+                {"id": third["id"], "marks": [0, 0]},
+            ],
+        })
+        self.assertEqual(saved.status_code, 200)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("UPDATE marks SET score = NULL WHERE student_id = ?", (third["id"],))
+            connection.commit()
+        finally:
+            connection.close()
+        payload = self.client.get("/api/dashboard/analytics").get_json()
+        self.assertEqual(payload["summary"]["totalActiveStudents"], 3)
+        self.assertEqual(payload["summary"]["studentsWithMarks"], 2)
+        self.assertEqual(payload["summary"]["classAveragePercentage"], 54.75)
+        self.assertEqual(payload["summary"]["passPercentage"], 50.0)
+        self.assertEqual(payload["summary"]["passMarkPercentage"], 40.0)
+        self.assertEqual(payload["summary"]["highestPerformers"][0]["name"], "Asha Rao")
+        self.assertEqual(payload["gradeDistribution"], {"A": 0, "B": 0, "C": 1, "D": 0, "E": 0, "F": 1})
+        maths = next(subject for subject in payload["subjects"] if subject["name"] == "Maths")
+        self.assertEqual(maths["studentCount"], 2)
+        self.assertEqual(maths["averageMarks"], 39.5)
+        self.assertEqual(maths["highestMarks"], 40)
+        self.assertEqual(maths["lowestMarks"], 39)
+        boundary = next(row for row in payload["results"] if row["id"] == first["id"])
+        self.assertEqual(boundary["status"], "Pass")
+        self.assertEqual(boundary["rank"], 1)
+        missing = next(row for row in payload["results"] if row["id"] == third["id"])
+        self.assertEqual(missing["status"], "No marks")
+        self.assertIsNone(missing["percentage"])
+        self.assertNotIn("guardian", str(payload).lower())
+        self.assertNotIn("admission", str(payload).lower())
+
+    def test_dashboard_normalizes_different_maxima_and_tied_ranks(self):
+        first = self.add_student().get_json()["student"]
+        second = self.add_student(studentCode="S-101", admissionNumber="ADM-101",
+                                  name="Ben Das", rollNumber="13").get_json()["student"]
+        saved = self.client.post("/api/analysis", json={
+            "passMark": 40, "subjects": ["Maths", "English"],
+            "students": [
+                {"id": first["id"], "marks": [50, 80]},
+                {"id": second["id"], "marks": [50, 80]},
+            ],
+        })
+        self.assertEqual(saved.status_code, 200)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE exam_subjects SET maximum_marks = 200, passing_marks = 80 WHERE subject_id = (SELECT id FROM subjects WHERE name = 'Maths')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        payload = self.client.get("/api/dashboard/analytics").get_json()
+        self.assertEqual(payload["summary"]["classAveragePercentage"], 52.5)
+        self.assertEqual([row["rank"] for row in payload["results"]], [1, 1])
+        maths = next(subject for subject in payload["subjects"] if subject["name"] == "Maths")
+        self.assertEqual(maths["averageMarks"], 50)
+        self.assertEqual(maths["averagePercentage"], 25)
+
+    def test_dashboard_scopes_duplicate_exam_history_and_filters(self):
+        first = self.add_student().get_json()["student"]
+        second = self.add_student(studentCode="S-101", admissionNumber="ADM-101",
+                                  name="Ben Das", rollNumber="13", className="Grade 8",
+                                  sectionName="Gold").get_json()["student"]
+        saved = self.client.post("/api/analysis", json={
+            "passMark": 40, "subjects": ["Maths"],
+            "students": [{"id": first["id"], "marks": [90]}, {"id": second["id"], "marks": [50]}],
+        })
+        self.assertEqual(saved.status_code, 200)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            year_id = connection.execute("SELECT id FROM academic_years WHERE is_current = 1").fetchone()[0]
+            class_id = connection.execute("SELECT id FROM classes WHERE name = 'Grade 7'").fetchone()[0]
+            section_id = connection.execute("SELECT id FROM sections WHERE name = 'Blue'").fetchone()[0]
+            default_exam_id = connection.execute("SELECT id FROM exams WHERE name = 'Practice Exam' AND academic_year_id IS NULL").fetchone()[0]
+            exam_id = connection.execute("INSERT INTO exams(school_id, academic_year_id, name) VALUES (1, ?, 'Practice Exam')", (year_id,)).lastrowid
+            subject_id = connection.execute("SELECT id FROM subjects WHERE name = 'Maths'").fetchone()[0]
+            exam_subject_id = connection.execute("INSERT INTO exam_subjects(exam_id, subject_id) VALUES (?, ?)", (exam_id, subject_id)).lastrowid
+            connection.execute("INSERT INTO marks(student_id, exam_subject_id, score) VALUES (?, ?, 20)", (first["id"], exam_subject_id))
+            connection.commit()
+        finally:
+            connection.close()
+        default = self.client.get(f"/api/dashboard/analytics?examId={default_exam_id}").get_json()
+        self.assertEqual(default["summary"]["studentsWithMarks"], 2)
+        historical = self.client.get(f"/api/dashboard/analytics?examId={exam_id}").get_json()
+        self.assertEqual(historical["summary"]["studentsWithMarks"], 1)
+        self.assertEqual(historical["summary"]["classAveragePercentage"], 20.0)
+        self.assertEqual(len(historical["results"]), 2)
+        filtered = self.client.get(
+            f"/api/dashboard/analytics?academicYearId={year_id}&classId={class_id}&sectionId={section_id}&search=Asha"
+        )
+        self.assertEqual(filtered.status_code, 200)
+        self.assertEqual([row["name"] for row in filtered.get_json()["results"]], ["Asha Rao"])
+        self.assertEqual(self.client.get(f"/api/dashboard/analytics?classId={class_id}&sectionId={section_id + 100}").status_code, 400)
+
+        next_year_response = self.client.post("/api/academic-years", json={"label": "2030-2031"})
+        self.assertEqual(next_year_response.status_code, 201)
+        next_year_id = next_year_response.get_json()["academicYear"]["id"]
+        enrollment = self.client.post(f"/api/students/{first['id']}/enrollments", json={
+            "academicYearId": next_year_id, "classId": class_id,
+            "sectionId": section_id, "rollNumber": "12", "status": "active",
+        })
+        self.assertEqual(enrollment.status_code, 201)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            next_exam_id = connection.execute(
+                "INSERT INTO exams(school_id, academic_year_id, name) VALUES (1, ?, 'Midterm')",
+                (next_year_id,),
+            ).lastrowid
+            next_exam_subject = connection.execute(
+                "INSERT INTO exam_subjects(exam_id, subject_id) VALUES (?, ?)",
+                (next_exam_id, subject_id),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO marks(student_id, exam_subject_id, score) VALUES (?, ?, 75)",
+                (first["id"], next_exam_subject),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        next_year_dashboard = self.client.get(
+            f"/api/dashboard/analytics?academicYearId={next_year_id}&examId={next_exam_id}"
+        ).get_json()
+        self.assertEqual(next_year_dashboard["summary"]["totalActiveStudents"], 1)
+        self.assertEqual([row["name"] for row in next_year_dashboard["results"]], ["Asha Rao"])
+
     def test_invalid_marks_do_not_save_partial_analysis(self):
         student = self.add_student().get_json()["student"]
         payload = {

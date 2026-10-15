@@ -565,6 +565,142 @@ def create_app(test_config=None):
             exam["name"], subjects, session["pass_mark"], results
         ))
 
+    @app.get("/api/dashboard/analytics")
+    def dashboard_analytics():
+        """Return year- and exam-scoped statistics based only on saved records."""
+        connection = _get_database()
+        years = connection.execute(
+            """SELECT id, label, starts_on, ends_on, is_current FROM academic_years
+               WHERE school_id = ? ORDER BY starts_on DESC, label DESC""",
+            (SCHOOL_ID,),
+        ).fetchall()
+        current_year = next((row for row in years if row["is_current"]), None)
+
+        raw_year_id = request.args.get("academicYearId")
+        year_id = _optional_positive_id(raw_year_id) if raw_year_id else (
+            current_year["id"] if current_year else None
+        )
+        if raw_year_id and year_id is None:
+            return _error("Academic year ID must be a positive whole number.", 400)
+        if year_id and not any(row["id"] == year_id for row in years):
+            return _error("Academic year not found.", 400)
+
+        raw_class_id = request.args.get("classId")
+        class_id = _optional_positive_id(raw_class_id) if raw_class_id else None
+        if raw_class_id and class_id is None:
+            return _error("Class ID must be a positive whole number.", 400)
+        classes = connection.execute(
+            "SELECT id, name FROM classes WHERE school_id = ? ORDER BY name COLLATE NOCASE",
+            (SCHOOL_ID,),
+        ).fetchall()
+        if class_id and not any(row["id"] == class_id for row in classes):
+            return _error("Class not found.", 400)
+
+        raw_section_id = request.args.get("sectionId")
+        section_id = _optional_positive_id(raw_section_id) if raw_section_id else None
+        if raw_section_id and section_id is None:
+            return _error("Section ID must be a positive whole number.", 400)
+        if section_id:
+            section = connection.execute(
+                """SELECT se.id, se.name, se.class_id, cl.name AS class_name FROM sections AS se
+                   JOIN classes AS cl ON cl.id = se.class_id
+                   WHERE se.id = ? AND cl.school_id = ?""",
+                (section_id, SCHOOL_ID),
+            ).fetchone()
+            if section is None or (class_id and section["class_id"] != class_id):
+                return _error("Section does not belong to the selected class.", 400)
+
+        raw_exam_id = request.args.get("examId")
+        exam_id = _optional_positive_id(raw_exam_id) if raw_exam_id else None
+        if raw_exam_id and exam_id is None:
+            return _error("Exam ID must be a positive whole number.", 400)
+        exams_query = """SELECT ex.id, ex.name, ex.exam_date, ex.academic_year_id,
+                                 COUNT(DISTINCT es.id) AS subject_count
+                          FROM exams AS ex LEFT JOIN exam_subjects AS es ON es.exam_id = ex.id
+                          WHERE ex.school_id = ?"""
+        exams_parameters = [SCHOOL_ID]
+        if year_id:
+            exams_query += " AND (ex.academic_year_id = ? OR ex.academic_year_id IS NULL)"
+            exams_parameters.append(year_id)
+        exams_query += " GROUP BY ex.id ORDER BY ex.exam_date DESC, ex.created_at DESC, ex.id DESC"
+        exam_rows = connection.execute(exams_query, exams_parameters).fetchall()
+        if exam_id and not any(row["id"] == exam_id for row in exam_rows):
+            return _error("Exam is not available for the selected academic year.", 400)
+        if exam_id is None:
+            exam_id = next((row["id"] for row in exam_rows if row["subject_count"]), None)
+        selected_exam = next((row for row in exam_rows if row["id"] == exam_id), None)
+
+        search = request.args.get("search", "").strip()
+        if len(search) > 100:
+            return _error("Search text must be 100 characters or fewer.", 400)
+
+        # One row per student for the selected year; the enrollment unique key
+        # prevents historical enrollment joins from multiplying students.
+        is_current_year = bool(current_year and year_id == current_year["id"])
+        year_class = "COALESCE(en.class_id, st.class_id)" if is_current_year else "en.class_id"
+        year_section = "COALESCE(en.section_id, st.section_id)" if is_current_year else "en.section_id"
+        active_condition = "COALESCE(en.status, st.enrollment_status) = 'active'" if is_current_year else "en.status = 'active'"
+        student_sql = f"""SELECT st.id, st.student_code, st.name,
+                                  {year_class} AS class_id, cl.name AS class_name,
+                                  {year_section} AS section_id, se.name AS section_name,
+                                  COALESCE(en.status, st.enrollment_status) AS enrollment_status
+                           FROM students AS st
+                           LEFT JOIN student_enrollments AS en
+                             ON en.student_id = st.id AND en.academic_year_id = ?
+                           LEFT JOIN classes AS cl ON cl.id = {year_class}
+                           LEFT JOIN sections AS se ON se.id = {year_section}
+                           WHERE st.school_id = ? AND st.is_active = 1
+                             AND {active_condition}"""
+        student_parameters = [year_id, SCHOOL_ID]
+        if class_id:
+            student_sql += f" AND {year_class} = ?"
+            student_parameters.append(class_id)
+        if section_id:
+            student_sql += f" AND {year_section} = ?"
+            student_parameters.append(section_id)
+        if search:
+            student_sql += " AND (st.name LIKE ? OR st.student_code LIKE ? OR st.admission_number LIKE ?)"
+            pattern = f"%{search}%"
+            student_parameters.extend([pattern, pattern, pattern])
+        student_sql += " ORDER BY st.name COLLATE NOCASE, st.student_code COLLATE NOCASE"
+        student_rows = connection.execute(student_sql, student_parameters).fetchall()
+
+        subject_rows = []
+        mark_rows = []
+        if selected_exam:
+            subject_rows = connection.execute(
+                """SELECT es.id AS exam_subject_id, su.id AS subject_id, su.name,
+                          es.maximum_marks, es.passing_marks
+                   FROM exam_subjects AS es JOIN subjects AS su ON su.id = es.subject_id
+                   WHERE es.exam_id = ? ORDER BY su.name COLLATE NOCASE""",
+                (exam_id,),
+            ).fetchall()
+            if student_rows and subject_rows:
+                student_placeholders = ",".join("?" for _ in student_rows)
+                mark_rows = connection.execute(
+                    f"""SELECT m.student_id, m.exam_subject_id, m.score
+                        FROM marks AS m
+                        WHERE m.student_id IN ({student_placeholders})
+                          AND m.exam_subject_id IN ({','.join('?' for _ in subject_rows)})""",
+                    [*[row["id"] for row in student_rows], *[row["exam_subject_id"] for row in subject_rows]],
+                ).fetchall()
+
+        analysis = _build_dashboard_analytics(student_rows, subject_rows, mark_rows)
+        return jsonify(
+            academicYears=[dict(row) for row in years],
+            classes=[dict(row) for row in classes],
+            sections=[dict(row) for row in connection.execute(
+                """SELECT se.id, se.name, se.class_id, cl.name AS class_name FROM sections AS se
+                   JOIN classes AS cl ON cl.id = se.class_id
+                   WHERE cl.school_id = ? ORDER BY cl.name COLLATE NOCASE, se.name COLLATE NOCASE""",
+                (SCHOOL_ID,),
+            ).fetchall()],
+            exams=[dict(row) for row in exam_rows],
+            selected={"academicYearId": year_id, "classId": class_id,
+                      "sectionId": section_id, "examId": exam_id},
+            **analysis,
+        )
+
     @app.errorhandler(404)
     def not_found(_exception):
         return _error("The requested page or record was not found.", 404)
@@ -870,6 +1006,159 @@ def _analysis_summary(exam_name, subjects, pass_mark, students):
         "passPercentage": 100 * passed_count / len(students),
         "students": students,
     }
+
+
+def _build_dashboard_analytics(student_rows, subject_rows, mark_rows):
+    """Build dashboard statistics from one exam's valid saved marks."""
+    subject_by_id = {row["exam_subject_id"]: row for row in subject_rows}
+    marks_by_student = {}
+    values_by_subject = {row["exam_subject_id"]: [] for row in subject_rows}
+    for row in mark_rows:
+        subject = subject_by_id.get(row["exam_subject_id"])
+        score = row["score"]
+        if subject is None or score is None:
+            continue
+        maximum = subject["maximum_marks"]
+        if maximum <= 0 or score < 0 or score > maximum:
+            continue
+        percent = 100 * score / maximum
+        marks_by_student.setdefault(row["student_id"], []).append({
+            "examSubjectId": row["exam_subject_id"],
+            "subjectId": subject["subject_id"],
+            "subject": subject["name"],
+            "score": score,
+            "maximum": maximum,
+            "percent": percent,
+            "passingPercent": 100 * subject["passing_marks"] / maximum,
+        })
+        values_by_subject[row["exam_subject_id"]].append((score, percent))
+
+    subject_analytics = []
+    for subject in subject_rows:
+        values = values_by_subject[subject["exam_subject_id"]]
+        scores = [value[0] for value in values]
+        percentages = [value[1] for value in values]
+        subject_analytics.append({
+            "id": subject["subject_id"],
+            "name": subject["name"],
+            "maximumMarks": subject["maximum_marks"],
+            "passingMarks": subject["passing_marks"],
+            "studentCount": len(values),
+            "averageMarks": _rounded(sum(scores) / len(scores)) if scores else None,
+            "averagePercentage": _rounded(sum(percentages) / len(percentages)) if percentages else None,
+            "highestMarks": max(scores) if scores else None,
+            "lowestMarks": min(scores) if scores else None,
+        })
+
+    results = []
+    student_pass_thresholds = []
+    for student in student_rows:
+        entered = marks_by_student.get(student["id"], [])
+        if entered:
+            average = sum(mark["percent"] for mark in entered) / len(entered)
+            pass_mark = sum(mark["passingPercent"] for mark in entered) / len(entered)
+            passed = average >= pass_mark
+            student_pass_thresholds.append(pass_mark)
+            grade = _grade_for_percentage(average)
+            percentage = _rounded(average)
+            status = "Pass" if passed else "Fail"
+        else:
+            average = None
+            pass_mark = None
+            passed = None
+            grade = None
+            percentage = None
+            status = "No marks"
+        results.append({
+            "id": student["id"],
+            "studentCode": student["student_code"],
+            "name": student["name"],
+            "className": student["class_name"],
+            "sectionName": student["section_name"],
+            "percentage": percentage,
+            "grade": grade,
+            "status": status,
+            "marksEntered": len(entered),
+            "subjectCount": len(subject_rows),
+            "rank": None,
+            "_average": average,
+            "_passMark": pass_mark,
+            "_passed": passed,
+        })
+
+    ranked = sorted(
+        (row for row in results if row["_average"] is not None),
+        key=lambda row: (-row["_average"], row["name"].casefold(), row["id"]),
+    )
+    previous_average = None
+    current_rank = 0
+    for index, row in enumerate(ranked, start=1):
+        if previous_average is None or row["_average"] != previous_average:
+            current_rank = index
+        row["rank"] = current_rank
+        previous_average = row["_average"]
+    graded = [row for row in results if row["_average"] is not None]
+    passing = sum(row["status"] == "Pass" for row in graded)
+    failing = sum(row["status"] == "Fail" for row in graded)
+    grade_distribution = {
+        grade: sum(row["grade"] == grade for row in graded)
+        for grade in ("A", "B", "C", "D", "E", "F")
+    }
+    highest_average = max((row["_average"] for row in graded), default=None)
+    highest_students = [
+        {"id": row["id"], "name": row["name"], "percentage": row["percentage"]}
+        for row in graded if row["_average"] == highest_average
+    ] if highest_average is not None else []
+    class_average = _rounded(sum(row["_average"] for row in graded) / len(graded)) if graded else None
+    pass_mark_average = _rounded(sum(student_pass_thresholds) / len(student_pass_thresholds)) if student_pass_thresholds else None
+    for row in results:
+        row["subjectResults"] = [
+            {"subject": mark["subject"], "score": mark["score"],
+             "maximum": mark["maximum"], "percentage": _rounded(mark["percent"])}
+            for mark in marks_by_student.get(row["id"], [])
+        ]
+        row.pop("_average", None)
+        row.pop("_passMark", None)
+        row.pop("_passed", None)
+
+    return {
+        "summary": {
+            "totalActiveStudents": len(student_rows),
+            "studentsWithMarks": len(graded),
+            "classAveragePercentage": class_average,
+            "passPercentage": _rounded(100 * passing / len(graded)) if graded else None,
+            "passMarkPercentage": pass_mark_average,
+            "highestPerformers": highest_students,
+        },
+        "subjects": subject_analytics,
+        "gradeDistribution": grade_distribution,
+        "passFailDistribution": {"pass": passing, "fail": failing},
+        "results": results,
+        "rules": {
+            "grades": "A: 90–100%, B: 80–89.99%, C: 70–79.99%, D: 60–69.99%, E: 40–59.99%, F: below 40%.",
+            "pass": "A student's mean percentage across entered valid subjects must meet or exceed the mean passing percentage configured for those subjects. Missing marks are excluded, not treated as zero.",
+            "rank": "Competition ranking by percentage; students tied at the same unrounded percentage share a rank (1, 1, 3).",
+            "average": "Class average gives equal weight to each student with at least one valid mark; subject averages use only students with a saved valid mark in that subject.",
+        },
+    }
+
+
+def _grade_for_percentage(percentage):
+    if percentage >= 90:
+        return "A"
+    if percentage >= 80:
+        return "B"
+    if percentage >= 70:
+        return "C"
+    if percentage >= 60:
+        return "D"
+    if percentage >= 40:
+        return "E"
+    return "F"
+
+
+def _rounded(value):
+    return round(value + 1e-10, 2)
 
 
 def _integrity_error(error):

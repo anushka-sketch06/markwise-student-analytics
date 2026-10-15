@@ -1,8 +1,8 @@
 # Markwise School Management System
 
-Markwise is being expanded from a student marks analyzer into a school management system. Phase 3 adds student profiles, academic years, classes, sections, and year-based enrollment history to the existing Flask and SQLite app while keeping the Markwise HTML, CSS, JavaScript, and marks analyzer.
+Markwise is being expanded from a student marks analyzer into a school management system. Phase 3 added student profiles, academic years, classes, sections, and year-based enrollment history; Phase 4 adds database-backed academic analytics and a dashboard to the existing Flask and SQLite app.
 
-## Current features (Phase 3)
+## Current features (Phase 4)
 
 - Add, view, edit, archive, and search students by name, student ID, admission number, or roll number.
 - Store admission number, guardian name and contact, admission date, and enrollment status in student profiles.
@@ -16,8 +16,13 @@ Markwise is being expanded from a student marks analyzer into a school managemen
 - Restore the most recent analysis and form entries after refreshing or restarting Markwise.
 - Download the analyzed results as CSV.
 - Keep archived students' saved marks in the database.
+- View a database-backed dashboard for active students, class average, pass percentage, highest performers, grade distribution, and pass/fail outcomes.
+- Compare subject averages, highest and lowest marks, and valid mark counts for a selected examination.
+- Filter analytics by academic year, class, section, examination, and student name or ID.
+- Review a privacy-limited results table with marks entered, percentage, grade, result, and competition rank; guardian and admission details are not returned by the analytics API.
+- Display responsive subject, grade, pass/fail, and top-student charts using native HTML and CSS without external chart scripts.
 
-The database also has initial relational tables for subjects, exams, marks, staff, attendance, fees, payments, timetable slots, and announcements. Only student, academic-year, class, section, enrollment, and marks workflows are currently managed by the app. There are no fees, staff, attendance, timetable, announcements, or analytics dashboard workflows yet.
+The database also has initial relational tables for subjects, exams, marks, staff, attendance, fees, payments, timetable slots, and announcements. The app manages student, academic-year, class, section, enrollment, marks, and academic analytics workflows. There are no fees, staff, attendance, timetable, or announcements workflows yet.
 
 The old command-line analyzer is still available as a separate tool; it does not write to the Markwise database.
 
@@ -30,6 +35,18 @@ The old command-line analyzer is still available as a separate tool; it does not
 - **Tests:** Python's built-in `unittest` and Flask's test client.
 
 The API uses parameterized SQLite statements. Validation runs on the server even when a browser form also checks the input. The development server binds only to `127.0.0.1`; this phase does not add login or production deployment security.
+
+## Dashboard analytics rules
+
+The dashboard reads the selected academic year's active students and one selected examination. When the examination filter is left at its default, it selects the most recent available examination for that year (including unassigned legacy exams). It does not combine historical exams, which prevents repeated students or marks from inflating results. Analytics use only saved non-null marks between zero and that subject's configured maximum; a missing mark is not treated as zero. Percentages normalize scores by each subject's maximum marks.
+
+- A student's average is the arithmetic mean of their entered valid subject percentages. Their result is Pass when that average meets or exceeds the mean configured passing percentage for those same subjects.
+- The class average is the arithmetic mean of the percentages for students with at least one valid mark. Each student has equal weight.
+- Subject averages use only students with a saved valid mark for that subject. The dashboard also reports raw high/low marks against the subject's maximum.
+- Grades are A (90–100%), B (80–89.99%), C (70–79.99%), D (60–69.99%), E (40–59.99%), and F (below 40%). Grade bands are independent from each examination's pass threshold.
+- Rank uses unrounded average percentages and competition ranking; tied students share a rank (1, 1, 3).
+
+The charts are rendered with semantic HTML and CSS, so no CDN, chart package, or extra setup is required. Dashboard data is served from `GET /api/dashboard/analytics`; supported query parameters are `academicYearId`, `classId`, `sectionId`, `examId`, and `search`.
 
 ## Install and run on Windows PowerShell
 
@@ -68,7 +85,7 @@ From the project root, while the virtual environment is available:
 \.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The tests cover student create/list/detail/update/archive, duplicate IDs and roll numbers, input validation, SQL-safe search, marks validation and calculations, persistence across app restarts, database initialization and migration, serving the existing page assets, and safe database errors.
+The tests cover student create/list/detail/update/archive, duplicate IDs and roll numbers, input validation, SQL-safe search, marks validation and calculations, persistence across app restarts, database initialization and migration, dashboard empty states and filters, configured pass boundaries, missing marks, different subject maximums, historical exams, tied ranks, analytics privacy, serving the existing page assets, and safe database errors.
 
 ## Existing Python command-line analyzer
 

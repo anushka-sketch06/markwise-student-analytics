@@ -4,21 +4,28 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Manage Markwise student profiles, classes, enrollments, and marks.">
-  <title>Markwise · Student Management</title>
+  <title>Markwise · School Analytics</title>
   <link rel="stylesheet" href="styles.css">
   <script src="app.js" defer></script>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#top" aria-label="Student Marks Analyzer home"><span class="brand-icon">✳</span> markwise</a>
-    <span class="top-note">A simple classroom companion</span>
+    <a class="brand" href="#top" aria-label="Markwise home"><span class="brand-icon">✳</span> markwise</a>
+    <span class="top-note">School performance overview</span>
   </header>
+
+  <nav class="main-nav" aria-label="Main navigation">
+    <a class="active" href="#dashboard">Dashboard</a>
+    <a href="#student-management">Students</a>
+    <a href="#analyzer">Marks analyzer</a>
+    <a href="#class-management">Classes</a>
+  </nav>
 
   <main id="top" class="page-wrap">
     <section class="intro">
       <p class="eyebrow">MARKWISE SCHOOL RECORDS</p>
-      <h1>Student profiles<br><span>and enrollment.</span></h1>
-      <p class="intro-copy">Manage student information, academic years, classes, sections, and saved marks from one place.</p>
+      <h1>School performance,<br><span>at a glance.</span></h1>
+      <p class="intro-copy">Explore saved enrollment and examination results, then manage students and marks below.</p>
       <div class="privacy-note"><span aria-hidden="true">●</span> Private by design <i></i> No account needed</div>
     </section>
 
@@ -27,7 +34,42 @@
       <a href="http://127.0.0.1:5000/">http://127.0.0.1:5000/</a> to use the database-backed app.
     </aside>
 
-    <section class="workspace" aria-label="Marks analyzer">
+    <section id="dashboard" class="dashboard" aria-labelledby="dashboard-title">
+      <div class="dashboard-heading">
+        <div><p class="eyebrow">MARKWISE ANALYTICS</p><h1 id="dashboard-title">School dashboard</h1><p class="intro-copy">A live view of saved enrollment and examination results.</p></div>
+        <p id="dashboard-status" class="dashboard-status" role="status" aria-live="polite">Loading saved records…</p>
+      </div>
+      <form id="dashboard-filters" class="dashboard-filters" aria-label="Dashboard filters">
+        <label>Academic year<select id="dashboard-year"><option value="">Current year</option></select></label>
+        <label>Class<select id="dashboard-class"><option value="">All classes</option></select></label>
+        <label>Section<select id="dashboard-section"><option value="">All sections</option></select></label>
+        <label>Examination<select id="dashboard-exam"><option value="">Latest available exam</option></select></label>
+        <label>Search results<input id="dashboard-search" type="search" maxlength="100" placeholder="Student name or ID" autocomplete="off"></label>
+        <button class="secondary-button dashboard-refresh" type="submit">Apply filters</button>
+      </form>
+      <p id="dashboard-error" class="form-message" role="alert"></p>
+      <div id="dashboard-empty" class="dashboard-empty" hidden>No examination results are available for these filters yet. Save marks in the analyzer to see academic analytics here.</div>
+      <div class="summary-grid" aria-label="School summary">
+        <article class="summary-card"><span>Total active students</span><strong id="metric-students">—</strong><small id="metric-students-note">Selected academic year</small></article>
+        <article class="summary-card"><span>Class average</span><strong id="metric-average">—</strong><small>Average of student percentages</small></article>
+        <article class="summary-card"><span>Pass rate</span><strong id="metric-pass-rate">—</strong><small id="metric-pass-note">Based on configured pass marks</small></article>
+        <article class="summary-card highest-card"><span>Highest performer</span><strong id="metric-highest">—</strong><small id="metric-highest-note">Calculated from valid saved marks</small></article>
+      </div>
+      <div class="analytics-grid">
+        <article class="analytics-card"><div class="analytics-card-heading"><div><p class="eyebrow">SUBJECTS</p><h2>Average by subject</h2></div></div><div id="subject-chart" class="subject-chart" role="group" aria-label="Subject average percentages"></div></article>
+        <article class="analytics-card"><div class="analytics-card-heading"><div><p class="eyebrow">ACADEMIC PROFILE</p><h2>Grade distribution</h2></div></div><div id="grade-chart" class="distribution-chart" role="group" aria-label="Grade distribution"></div></article>
+        <article class="analytics-card"><div class="analytics-card-heading"><div><p class="eyebrow">OUTCOMES</p><h2>Pass and fail</h2></div></div><div id="pass-chart" class="pass-chart" role="group" aria-label="Pass and fail distribution"></div></article>
+        <article class="analytics-card"><div class="analytics-card-heading"><div><p class="eyebrow">STUDENT COMPARISON</p><h2>Top results</h2></div></div><div id="student-chart" class="student-chart" role="group" aria-label="Top student percentages"></div></article>
+      </div>
+      <details class="analytics-rules"><summary>How are grades, pass rates, averages, and ranks calculated?</summary><ul id="dashboard-rules"></ul></details>
+      <section class="analytics-card results-card" aria-labelledby="dashboard-results-title">
+        <div class="analytics-card-heading"><div><p class="eyebrow">SELECTED EXAMINATION</p><h2 id="dashboard-results-title">Student results</h2></div><span id="results-count" class="results-count"></span></div>
+        <p id="results-empty" class="detail-empty" hidden>No active students or marks match the selected filters.</p>
+        <div class="table-wrap"><table class="results-table"><thead><tr><th scope="col">Rank</th><th scope="col">Student</th><th scope="col">Student ID</th><th scope="col">Class / section</th><th scope="col">Marks entered</th><th scope="col">Average</th><th scope="col">Grade</th><th scope="col">Result</th></tr></thead><tbody id="dashboard-results"></tbody></table></div>
+      </section>
+    </section>
+
+    <section id="analyzer" class="workspace" aria-label="Marks analyzer">
       <form id="analyzer-form" class="entry-card">
         <div class="card-heading">
           <div><p class="eyebrow">SET UP YOUR CLASS</p><h2>Class details</h2></div>

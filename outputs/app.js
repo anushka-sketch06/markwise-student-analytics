@@ -190,6 +190,7 @@ async function analyzeMarks(event) {
     });
     latestResults = response.analysis;
     renderResults(latestResults);
+    await loadDashboard();
     showToast("Marks saved to the Markwise database.");
   } catch (error) {
     message.textContent = error.message;
@@ -416,6 +417,7 @@ async function removeStudent(studentId, studentName) {
   try {
     const result = await fetchJson(`/api/students/${studentId}`, { method: "DELETE" });
     await refreshStudents();
+    await loadDashboard();
     showToast(result.message);
   } catch (error) {
     showToast(error.message, true);
@@ -457,6 +459,7 @@ async function saveStudent(event) {
     studentForm.reset();
     studentForm.hidden = true;
     await refreshStudents();
+    await loadDashboard();
     showToast(studentId ? "Student record updated." : `Student added: ${saved.student.student_code}`);
   } catch (error) {
     studentFormError.textContent = error.message;
@@ -524,6 +527,7 @@ function wireEnrollmentForm(studentId) {
       });
       studentDialog.close();
       await refreshStudents();
+      await loadDashboard();
       showToast("Enrollment saved. Previous academic years were retained.");
     } catch (error) {
       errorArea.textContent = error.message;
@@ -541,10 +545,148 @@ async function submitStructureForm(form, endpoint, body, errorSelector, successM
     form.reset();
     await refreshSchoolStructure();
     await searchStudents();
+    await loadDashboard();
     showToast(successMessage);
   } catch (error) { errorArea.textContent = error.message; }
   finally { button.disabled = false; }
 }
+
+function fillDashboardFilter(select, records, firstLabel, labelFor, selectedValue) {
+  select.innerHTML = `<option value="">${escapeHtml(firstLabel)}</option>` + records.map((record) =>
+    `<option value="${record.id}">${escapeHtml(labelFor(record))}</option>`).join("");
+  if (records.some((record) => String(record.id) === String(selectedValue))) select.value = String(selectedValue);
+}
+
+function renderDashboard(data) {
+  const summary = data.summary;
+  document.querySelector("#metric-students").textContent = summary.totalActiveStudents;
+  document.querySelector("#metric-students-note").textContent = `${summary.studentsWithMarks} with valid marks · selected roster filters`;
+  document.querySelector("#metric-average").textContent = summary.classAveragePercentage === null ? "—" : `${summary.classAveragePercentage}%`;
+  document.querySelector("#metric-pass-rate").textContent = summary.passPercentage === null ? "—" : `${summary.passPercentage}%`;
+  document.querySelector("#metric-pass-note").textContent = summary.passMarkPercentage === null
+    ? "No valid marks to compare" : `Configured average pass mark: ${summary.passMarkPercentage}%`;
+  const highest = summary.highestPerformers;
+  document.querySelector("#metric-highest").textContent = highest.length
+    ? highest.map((student) => student.name).join(", ") : "—";
+  document.querySelector("#metric-highest-note").textContent = highest.length
+    ? `${highest[0].percentage}%${highest.length > 1 ? " · tied highest" : ""}` : "No valid results for this exam";
+
+  fillDashboardFilter(document.querySelector("#dashboard-year"), data.academicYears, "Choose academic year", (year) => `${year.label}${year.is_current ? " · Current" : ""}`, data.selected.academicYearId);
+  fillDashboardFilter(document.querySelector("#dashboard-class"), data.classes, "All classes", (record) => record.name, data.selected.classId);
+  renderDashboardSections(data.sections, data.selected.classId, data.selected.sectionId);
+  fillDashboardFilter(document.querySelector("#dashboard-exam"), data.exams, "Latest available exam", (exam) => `${exam.name}${exam.exam_date ? ` · ${exam.exam_date}` : ""}`, data.selected.examId);
+
+  const examHasSubjects = data.subjects.length > 0;
+  document.querySelector("#dashboard-empty").hidden = examHasSubjects;
+  document.querySelector("#subject-chart").innerHTML = renderSubjectChart(data.subjects);
+  document.querySelector("#grade-chart").innerHTML = renderGradeChart(data.gradeDistribution, summary.studentsWithMarks);
+  document.querySelector("#pass-chart").innerHTML = renderPassChart(data.passFailDistribution, summary.studentsWithMarks);
+  document.querySelector("#student-chart").innerHTML = renderStudentChart(data.results);
+  document.querySelector("#dashboard-rules").innerHTML = Object.values(data.rules).map((rule) => `<li>${escapeHtml(rule)}</li>`).join("");
+
+  const sortedResults = [...data.results].sort((a, b) => {
+    if (a.rank !== null && b.rank !== null) return a.rank - b.rank || a.name.localeCompare(b.name);
+    if (a.rank !== null) return -1;
+    if (b.rank !== null) return 1;
+    return a.name.localeCompare(b.name);
+  });
+  const body = document.querySelector("#dashboard-results");
+  body.innerHTML = sortedResults.map((student) => `<tr>
+    <td>${student.rank === null ? "—" : student.rank}</td>
+    <td>${escapeHtml(student.name)}</td><td>${escapeHtml(student.studentCode)}</td>
+    <td>${escapeHtml([student.className, student.sectionName].filter(Boolean).join(" · ") || "—")}</td>
+    <td>${student.marksEntered} / ${student.subjectCount}</td>
+    <td>${student.percentage === null ? "—" : `${student.percentage}%`}</td>
+    <td>${student.grade || "—"}</td><td><span class="result-chip ${student.status === "Pass" ? "is-pass" : student.status === "Fail" ? "is-fail" : "is-empty"}">${escapeHtml(student.status)}</span></td>
+  </tr>`).join("");
+  document.querySelector("#results-count").textContent = `${data.results.length} student${data.results.length === 1 ? "" : "s"}`;
+  document.querySelector("#results-empty").hidden = data.results.length > 0;
+  document.querySelector("#dashboard-status").textContent = data.exams.find((exam) => exam.id === data.selected.examId)?.name || "Live saved data";
+}
+
+function renderDashboardSections(sections, classId, selectedId) {
+  const filtered = classId ? sections.filter((section) => section.class_id === Number(classId)) : sections;
+  fillDashboardFilter(document.querySelector("#dashboard-section"), filtered, "All sections", (section) => {
+    const parent = sections.find((item) => item.id === section.id);
+    return parent?.class_name ? `${parent.class_name} · ${section.name}` : section.name;
+  }, selectedId);
+}
+
+function renderSubjectChart(subjects) {
+  if (!subjects.some((subject) => subject.averagePercentage !== null)) return '<p class="chart-empty">No valid subject marks for this exam.</p>';
+  return subjects.map((subject) => {
+    const value = subject.averagePercentage;
+    if (value === null) return `<div class="subject-bar-row"><span>${escapeHtml(subject.name)}</span><div class="bar-track"><i style="width:0%"></i></div><strong>—</strong><small>No marks</small></div>`;
+    return `<div class="subject-bar-row"><span>${escapeHtml(subject.name)}</span><div class="bar-track"><i style="width:${Math.max(0, Math.min(100, value))}%"></i></div><strong>${value}%</strong><small>${subject.studentCount} student${subject.studentCount === 1 ? "" : "s"} · ${formatDashboardMark(subject.lowestMarks)}–${formatDashboardMark(subject.highestMarks)} / ${formatDashboardMark(subject.maximumMarks)}</small></div>`;
+  }).join("");
+}
+
+function renderGradeChart(distribution, total) {
+  if (!total) return '<p class="chart-empty">Grade counts appear after marks are saved.</p>';
+  return `<div class="grade-bars">${Object.entries(distribution).map(([grade, count]) => {
+    const height = Math.max(count ? 5 : 0, Math.round(count / total * 100));
+    return `<div class="grade-column"><strong>${count}</strong><div class="grade-track"><i style="height:${height}%"></i></div><span>${grade}</span></div>`;
+  }).join("")}</div><p class="chart-caption">${total} student${total === 1 ? "" : "s"} with valid results</p>`;
+}
+
+function renderPassChart(distribution, total) {
+  if (!total) return '<p class="chart-empty">No pass/fail results to show yet.</p>';
+  const passPercent = distribution.pass / total * 100;
+  return `<div class="pass-chart-layout"><div class="donut-chart" style="--pass:${passPercent}%" aria-hidden="true"><span>${Math.round(passPercent)}%</span></div><ul class="chart-legend"><li><i class="legend-pass"></i>Pass <strong>${distribution.pass}</strong></li><li><i class="legend-fail"></i>Fail <strong>${distribution.fail}</strong></li></ul></div>`;
+}
+
+function renderStudentChart(results) {
+  const leaders = results.filter((student) => student.percentage !== null)
+    .sort((a, b) => a.rank - b.rank || a.name.localeCompare(b.name));
+  if (!leaders.length) return '<p class="chart-empty">Student comparisons appear after marks are saved.</p>';
+  return leaders.map((student) => `<div class="student-bar-row"><span title="${escapeAttribute(student.name)}">${escapeHtml(student.name)}</span><div class="bar-track"><i style="width:${Math.max(0, Math.min(100, student.percentage))}%"></i></div><strong>${student.percentage}%</strong></div>`).join("");
+}
+
+function formatDashboardMark(value) {
+  return value === null ? "—" : Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
+}
+
+async function loadDashboard() {
+  const form = document.querySelector("#dashboard-filters");
+  const apply = form.querySelector('button[type="submit"]');
+  const error = document.querySelector("#dashboard-error");
+  const query = new URLSearchParams();
+  for (const [selector, key] of [["#dashboard-year", "academicYearId"], ["#dashboard-class", "classId"], ["#dashboard-section", "sectionId"], ["#dashboard-exam", "examId"], ["#dashboard-search", "search"]]) {
+    const value = document.querySelector(selector).value.trim();
+    if (value) query.set(key, value);
+  }
+  error.textContent = "";
+  apply.disabled = true;
+  try {
+    const data = await fetchJson(`/api/dashboard/analytics${query.size ? `?${query}` : ""}`);
+    renderDashboard(data);
+  } catch (problem) {
+    error.textContent = problem.message;
+    document.querySelector("#dashboard-status").textContent = "Analytics unavailable";
+  } finally { apply.disabled = false; }
+}
+
+document.querySelector("#dashboard-filters").addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadDashboard();
+});
+document.querySelector(".main-nav").addEventListener("click", (event) => {
+  const selected = event.target.closest("a[href^='#']");
+  if (!selected) return;
+  document.querySelectorAll(".main-nav a").forEach((link) => link.classList.toggle("active", link === selected));
+});
+for (const selector of ["#dashboard-year", "#dashboard-class", "#dashboard-section", "#dashboard-exam"]) {
+  document.querySelector(selector).addEventListener("change", () => {
+    if (selector === "#dashboard-year") document.querySelector("#dashboard-exam").value = "";
+    if (selector === "#dashboard-class") document.querySelector("#dashboard-section").value = "";
+    loadDashboard();
+  });
+}
+let dashboardSearchTimer = null;
+document.querySelector("#dashboard-search").addEventListener("input", () => {
+  clearTimeout(dashboardSearchTimer);
+  dashboardSearchTimer = setTimeout(loadDashboard, 250);
+});
 
 document.querySelector("#academic-year-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -611,3 +753,4 @@ if (window.location.protocol === "file:") {
   document.querySelector("#backend-warning").hidden = false;
 }
 refreshStudents();
+loadDashboard();
