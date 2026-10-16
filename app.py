@@ -164,10 +164,12 @@ def create_app(test_config=None):
     def list_classes():
         rows = _get_database().execute(
             """SELECT cl.id, cl.name, COUNT(DISTINCT se.id) AS section_count,
-                      COUNT(DISTINCT en.student_id) AS active_students
+                      COUNT(DISTINCT st.id) AS active_students
                FROM classes AS cl LEFT JOIN sections AS se ON se.class_id = cl.id
                LEFT JOIN student_enrollments AS en ON en.class_id = cl.id AND en.status = 'active'
                  AND en.academic_year_id = (SELECT id FROM academic_years WHERE school_id = ? AND is_current = 1)
+               LEFT JOIN students AS st ON st.id = en.student_id AND st.school_id = cl.school_id
+                 AND st.is_active = 1
                WHERE cl.school_id = ? GROUP BY cl.id ORDER BY cl.name COLLATE NOCASE""",
             (SCHOOL_ID, SCHOOL_ID),
         ).fetchall()
@@ -192,8 +194,17 @@ def create_app(test_config=None):
     @app.get("/api/sections")
     def list_sections():
         rows = _get_database().execute(
-            "SELECT se.id, se.name, cl.id AS class_id, cl.name AS class_name FROM sections AS se JOIN classes AS cl ON cl.id = se.class_id WHERE cl.school_id = ? ORDER BY cl.name COLLATE NOCASE, se.name COLLATE NOCASE",
-            (SCHOOL_ID,),
+            """SELECT se.id, se.name, cl.id AS class_id, cl.name AS class_name,
+                      COUNT(DISTINCT st.id) AS active_students
+               FROM sections AS se JOIN classes AS cl ON cl.id = se.class_id
+               LEFT JOIN student_enrollments AS en ON en.section_id = se.id
+                 AND en.class_id = se.class_id AND en.status = 'active'
+                 AND en.academic_year_id = (SELECT id FROM academic_years WHERE school_id = ? AND is_current = 1)
+               LEFT JOIN students AS st ON st.id = en.student_id AND st.school_id = cl.school_id
+                 AND st.is_active = 1
+               WHERE cl.school_id = ?
+               GROUP BY se.id ORDER BY cl.name COLLATE NOCASE, se.name COLLATE NOCASE""",
+            (SCHOOL_ID, SCHOOL_ID),
         ).fetchall()
         return jsonify(sections=[dict(row) for row in rows])
 

@@ -478,10 +478,28 @@ async function refreshSchoolStructure() {
     schoolSections = sectionsResponse.sections;
     document.querySelector("#academic-year-list").innerHTML = academicYears.map((year) =>
       `<li><strong>${escapeHtml(year.label)}</strong>${year.is_current ? '<span class="current-chip">Current</span>' : ""}<small>${escapeHtml(year.starts_on || "Date not set")} – ${escapeHtml(year.ends_on || "Date not set")}</small></li>`).join("") || '<li class="detail-empty">No academic years yet.</li>';
-    document.querySelector("#class-list").innerHTML = schoolClasses.map((record) => {
+    const currentClasses = schoolClasses.filter((record) => record.active_students > 0);
+    const unusedClasses = schoolClasses.filter((record) => record.active_students === 0);
+    const unusedSectionsInActiveClasses = schoolSections.filter((section) => section.active_students === 0
+      && currentClasses.some((record) => record.id === section.class_id));
+    document.querySelector("#class-list").innerHTML = currentClasses.map((record) => {
+      const sections = schoolSections.filter((section) => section.class_id === record.id && section.active_students > 0);
+      const sectionNames = sections.map((section) => displaySectionName(section.name));
+      return `<article class="class-item"><strong>${escapeHtml(displayClassName(record.name))}</strong><span>${record.active_students} active student${record.active_students === 1 ? "" : "s"} · ${sections.length} active section${sections.length === 1 ? "" : "s"}</span><small>${escapeHtml(sectionNames.join(" · ") || "No active section assigned")}</small></article>`;
+    }).join("") || '<p class="detail-empty">No classes have active enrollments for the current academic year.</p>';
+
+    const unusedClassCards = unusedClasses.map((record) => {
       const sections = schoolSections.filter((section) => section.class_id === record.id);
-      return `<article class="class-item"><strong>${escapeHtml(record.name)}</strong><span>${record.active_students} enrolled · ${record.section_count} sections</span><small>${sections.map((section) => escapeHtml(section.name)).join(" · ") || "No sections"}</small></article>`;
-    }).join("") || '<p class="detail-empty">No classes yet.</p>';
+      const sectionNames = sections.map((section) => `${displaySectionName(section.name)} · 0 active students`);
+      return `<article class="class-item unused-class-item"><strong>${escapeHtml(displayClassName(record.name))}</strong><span>0 active students in the current academic year</span><small>${escapeHtml(sectionNames.join(" · ") || "No sections")}</small></article>`;
+    });
+    const unusedSectionCards = unusedSectionsInActiveClasses.map((section) =>
+      `<article class="class-item unused-class-item"><strong>${escapeHtml(displaySectionName(section.name))}</strong><span>${escapeHtml(displayClassName(section.class_name))} · 0 active students</span><small>This section record is retained.</small></article>`);
+    document.querySelector("#unused-class-list").innerHTML = [...unusedClassCards, ...unusedSectionCards].join("");
+    const unusedCount = unusedClasses.length + schoolSections.filter((section) => section.active_students === 0).length;
+    document.querySelector("#unused-setup-count").textContent = `${unusedCount} record${unusedCount === 1 ? "" : "s"}`;
+    document.querySelector("#unused-setup-empty").hidden = unusedCount > 0;
+    document.querySelector("#unused-class-list").hidden = unusedCount === 0;
     fillSelect("#student-year-filter", academicYears, "Current year", (year) => `${year.label}${year.is_current ? " · Current" : ""}`);
     fillSelect("#student-class-filter", schoolClasses, "All classes", (record) => record.name);
     fillSelect("#section-form select[name=classId]", schoolClasses, "Choose class", (record) => record.name);
@@ -492,6 +510,18 @@ async function refreshSchoolStructure() {
   } catch (error) {
     showToast(`School structure could not load: ${error.message}`, true);
   }
+}
+
+function displayClassName(name) {
+  const value = String(name || "");
+  if (/^class\b/i.test(value)) return `Class ${value.replace(/^class\s*/i, "")}`;
+  return /^\d+$/.test(value) ? `Class ${value}` : value;
+}
+
+function displaySectionName(name) {
+  const value = String(name || "");
+  const sectionName = value.replace(/^section\s*/i, "");
+  return `Section ${sectionName ? `${sectionName[0].toUpperCase()}${sectionName.slice(1)}` : ""}`;
 }
 
 function fillSelect(selector, records, firstLabel, labelFor) {

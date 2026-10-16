@@ -268,6 +268,51 @@ class MarkwiseAppTests(unittest.TestCase):
         restarted = create_app({"TESTING": True, "DATABASE": str(self.database_path)}).test_client()
         self.assertEqual(len(restarted.get(f"/api/students/{student['id']}/enrollments").get_json()["enrollments"]), 2)
 
+    def test_class_and_section_counts_use_current_active_enrollments_and_keep_unused_records(self):
+        students = []
+        for index in range(4):
+            students.append(self.add_student(
+                studentCode=f"M-{index + 1}", admissionNumber=f"ADM-M-{index + 1}",
+                name=f"Class 10 student {index + 1}", rollNumber=str(index + 1),
+                className="10", sectionName="f",
+            ).get_json()["student"])
+        archived = self.client.delete(f"/api/students/{students[-1]['id']}")
+        self.assertEqual(archived.status_code, 200)
+
+        other_class_24 = self.client.post("/api/classes", json={"name": "24"}).get_json()["classRecord"]
+        other_class_4 = self.client.post("/api/classes", json={"name": "4"}).get_json()["classRecord"]
+        current_class_10 = next(record for record in self.client.get("/api/classes").get_json()["classes"] if record["name"] == "10")
+        created = self.client.post(f"/api/classes/{other_class_24['id']}/sections", json={"name": "c"})
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(self.client.post(f"/api/classes/{other_class_4['id']}/sections", json={"name": "g"}).status_code, 201)
+        self.assertEqual(self.client.post(f"/api/classes/{current_class_10['id']}/sections", json={"name": "c"}).status_code, 201)
+
+        class_rows = self.client.get("/api/classes").get_json()["classes"]
+        classes = {row["name"]: row for row in class_rows}
+        self.assertEqual(classes["10"]["active_students"], 3)
+        self.assertEqual(classes["10"]["section_count"], 2)
+        self.assertEqual(classes["24"]["active_students"], 0)
+        self.assertEqual(classes["4"]["active_students"], 0)
+
+        section_rows = self.client.get("/api/sections").get_json()["sections"]
+        sections = {(row["class_name"], row["name"]): row for row in section_rows}
+        self.assertEqual(sections[("10", "f")]["active_students"], 3)
+        self.assertEqual(sections[("10", "c")]["active_students"], 0)
+        self.assertEqual(sections[("24", "c")]["active_students"], 0)
+        self.assertEqual(sections[("4", "g")]["active_students"], 0)
+
+        # Archiving hides the student from current counts but preserves their enrollment row.
+        connection = sqlite3.connect(self.database_path)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM student_enrollments WHERE student_id = ?", (students[-1]["id"],)
+            ).fetchone()[0], 1)
+        finally:
+            connection.close()
+
+        dashboard = self.client.get("/api/dashboard/analytics").get_json()
+        self.assertEqual(dashboard["summary"]["totalActiveStudents"], 3)
+
     def test_search_treats_sql_text_as_data(self):
         self.add_student()
         response = self.client.get("/api/students?search=%27%20OR%201%3D1%20--")
@@ -540,6 +585,9 @@ class MarkwiseAppTests(unittest.TestCase):
         with self.client.get("/") as page:
             self.assertEqual(page.status_code, 200)
             self.assertIn(b"markwise", page.data.lower())
+            self.assertIn(b"Current active setup", page.data)
+            self.assertIn(b"Unused setup records", page.data)
+            self.assertIn(b"unused-class-list", page.data)
         with self.client.get("/app.js") as javascript:
             self.assertEqual(javascript.status_code, 200)
         with self.client.get("/styles.css") as styles:

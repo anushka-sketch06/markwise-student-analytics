@@ -192,7 +192,18 @@
           <button class="secondary-button" type="submit">Add section</button><p class="form-message" id="section-form-error" role="alert"></p>
         </form>
       </div>
-      <div class="structure-lists"><div><h3>Academic years</h3><ul id="academic-year-list" class="plain-list"></ul></div><div><h3>Classes and sections</h3><div id="class-list" class="class-list"></div></div></div>
+      <div class="structure-lists">
+        <div><h3>Academic years</h3><ul id="academic-year-list" class="plain-list"></ul></div>
+        <div class="class-setup-area">
+          <section aria-labelledby="active-class-setup-title"><h3 id="active-class-setup-title">Current active setup</h3><p class="setup-note">Classes and sections with active enrollments in the current academic year.</p><div id="class-list" class="class-list"></div></section>
+          <details id="unused-setup-records" class="unused-setup">
+            <summary>Unused setup records <span id="unused-setup-count" class="current-chip">0</span></summary>
+            <p class="setup-note">These records have no active enrollments in the current academic year. They are retained and remain available here.</p>
+            <div id="unused-class-list" class="class-list"></div>
+            <p id="unused-setup-empty" class="detail-empty" hidden>No unused class or section records.</p>
+          </details>
+        </div>
+      </div>
     </section>
 
     <dialog id="student-dialog" class="student-dialog" aria-labelledby="student-dialog-title">
