@@ -16,6 +16,7 @@
 
   <nav class="main-nav" aria-label="Main navigation">
     <a class="active" href="#dashboard">Dashboard</a>
+    <a href="#student-progress">Student Progress</a>
     <a href="#student-management">Students</a>
     <a href="#analyzer">Marks analyzer</a>
     <a href="#class-management">Classes</a>
@@ -67,6 +68,28 @@
         <p id="results-empty" class="detail-empty" hidden>No active students or marks match the selected filters.</p>
         <div class="table-wrap"><table class="results-table"><thead><tr><th scope="col">Rank</th><th scope="col">Student</th><th scope="col">Student ID</th><th scope="col">Class / section</th><th scope="col">Marks entered</th><th scope="col">Average</th><th scope="col">Grade</th><th scope="col">Result</th></tr></thead><tbody id="dashboard-results"></tbody></table></div>
       </section>
+    </section>
+
+    <section id="student-progress" class="students-card progress-page" aria-labelledby="progress-title">
+      <div class="card-heading students-card-heading"><div><p class="eyebrow">INDIVIDUAL ACADEMICS</p><h2 id="progress-title">Student Progress</h2><p class="intro-copy">Review saved examination results over time. Percentages account for each subject's maximum marks.</p></div></div>
+      <div class="progress-filters">
+        <label>Find a student<input id="progress-search" type="search" maxlength="100" autocomplete="off" placeholder="Search name, student ID, or roll number"></label>
+        <label>Student<select id="progress-student" required><option value="">Choose a student</option></select></label>
+        <label>Academic year<select id="progress-year"><option value="">All academic years</option></select></label>
+        <label>Subject<select id="progress-subject"><option value="">All subjects</option></select></label>
+      </div>
+      <p id="progress-error" class="form-message" role="alert"></p>
+      <div id="progress-content" hidden>
+        <div id="progress-student-summary" class="progress-student-summary"></div>
+        <article class="analytics-card progress-chart-card" aria-labelledby="progress-chart-title">
+          <div class="analytics-card-heading"><div><p class="eyebrow">PERFORMANCE TREND</p><h3 id="progress-chart-title">Percentage across examinations</h3></div></div>
+          <div id="progress-chart" class="progress-chart" role="img"></div>
+          <p id="progress-chart-note" class="chart-caption"></p>
+        </article>
+        <p id="progress-empty" class="detail-empty" hidden></p>
+        <div class="table-wrap progress-table-wrap"><table class="results-table progress-table"><thead><tr><th scope="col">Academic year</th><th scope="col">Examination</th><th scope="col">Date</th><th scope="col">Subject results</th><th scope="col">Overall</th></tr></thead><tbody id="progress-results"></tbody></table></div>
+      </div>
+      <p id="progress-prompt" class="detail-empty">Choose a student to view saved examination results.</p>
     </section>
 
     <section id="analyzer" class="workspace" aria-label="Marks analyzer">

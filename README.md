@@ -22,6 +22,16 @@ Markwise is being expanded from a student marks analyzer into a school managemen
 - Review a privacy-limited results table with marks entered, percentage, grade, result, and competition rank; guardian and admission details are not returned by the analytics API.
 - Display responsive subject, grade, pass/fail, and top-student charts using native HTML and CSS without external chart scripts.
 
+## Individual Student Progress (Phase 5A)
+
+The **Student Progress** navigation item opens an individual history view. Search for an active saved student by name, student ID, or roll number, then optionally filter the results by academic year and subject. The page shows only the student's name, student ID, roll number, and class/section; it does not request guardian or admission details. Examination rows use their database exam IDs, so similarly named examinations remain distinct. Results are ordered by academic-year start and exam date, with creation date/ID as a stable fallback.
+
+Every saved mark is normalized to a percentage using that examination subject's own maximum. The overall exam percentage is the mean of valid subject percentages; missing marks (`NULL` or no mark row) are omitted and labeled **Missing**, while a saved zero remains a recorded `0 / maximum (0%)`. The subject filter narrows the subject details and trend line; the per-exam overall column remains the full-exam average. The native SVG trend plots overall percentages unless one subject is selected, and leaves missing points out of the line. A single examination receives an explanatory message instead of a misleading trend.
+
+The existing schema has no separate student-to-examination participation table. Therefore, an examination appears in a student's history only when at least one mark row exists for that student in that exam; within those exams, unentered subject marks appear as missing. Exams with no mark row at all cannot be inferred as attended or assigned and are not shown. Legacy exams without an academic year are labeled **Academic year not assigned** and appear only when all years are selected.
+
+The progress data endpoints are `GET /api/student-progress/students?search=...` (privacy-limited selector data) and `GET /api/students/<student_id>/progress?academicYearId=...&subjectId=...`. Both use parameterized queries and validate filters. No chart package, CDN, or schema migration is required.
+
 The database also has initial relational tables for subjects, exams, marks, staff, attendance, fees, payments, timetable slots, and announcements. The app manages student, academic-year, class, section, enrollment, marks, and academic analytics workflows. There are no fees, staff, attendance, timetable, or announcements workflows yet.
 
 The old command-line analyzer is still available as a separate tool; it does not write to the Markwise database.
@@ -85,7 +95,7 @@ From the project root, while the virtual environment is available:
 \.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The tests cover student create/list/detail/update/archive, duplicate IDs and roll numbers, input validation, SQL-safe search, marks validation and calculations, persistence across app restarts, database initialization and migration, dashboard empty states and filters, configured pass boundaries, missing marks, different subject maximums, historical exams, tied ranks, analytics privacy, serving the existing page assets, and safe database errors.
+The tests cover student create/list/detail/update/archive, duplicate IDs and roll numbers, input validation, SQL-safe search, marks validation and calculations, persistence across app restarts, database initialization and migration, dashboard empty states and filters, configured pass boundaries, missing marks, different subject maximums, historical exams, tied ranks, analytics privacy, individual progress history with multiple exams, different maxima, subject/year filters, chronological ordering, zero versus missing marks, empty/unknown students, serving the existing page assets, and safe database errors.
 
 ## Existing Python command-line analyzer
 

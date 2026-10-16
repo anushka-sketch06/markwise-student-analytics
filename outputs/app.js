@@ -666,6 +666,111 @@ async function loadDashboard() {
   } finally { apply.disabled = false; }
 }
 
+function progressStudentLabel(student) {
+  const placement = [student.class_name, student.section_name].filter(Boolean).join(" · ");
+  return `${student.name} · ${student.student_code}${placement ? ` · ${placement}` : ""}`;
+}
+
+async function loadProgressStudents() {
+  const search = document.querySelector("#progress-search").value.trim();
+  const query = new URLSearchParams();
+  if (search) query.set("search", search);
+  const select = document.querySelector("#progress-student");
+  const selected = select.value;
+  const data = await fetchJson(`/api/student-progress/students${query.size ? `?${query}` : ""}`);
+  select.replaceChildren(new Option(data.students.length ? "Choose a student" : "No matching students", ""));
+  data.students.forEach((student) => select.add(new Option(progressStudentLabel(student), String(student.id))));
+  if (data.students.some((student) => String(student.id) === selected)) select.value = selected;
+  else if (selected) {
+    document.querySelector("#progress-content").hidden = true;
+    document.querySelector("#progress-prompt").hidden = false;
+  }
+}
+
+function progressNumber(value) {
+  return value === null ? "—" : `${Number.isInteger(value) ? value : Number(value.toFixed(2))}`;
+}
+
+function renderProgressChart(exams, subjectId) {
+  const element = document.querySelector("#progress-chart");
+  const series = exams.map((exam) => {
+    const subject = subjectId ? exam.subjects.find((item) => item.subjectId === Number(subjectId)) : null;
+    return { exam, value: subjectId ? (subject ? subject.percentage : null) : exam.overallPercentage };
+  });
+  const valid = series.map((point, index) => ({ ...point, index })).filter((point) => point.value !== null);
+  if (!valid.length) {
+    element.innerHTML = '<p class="chart-empty">No saved percentages are available for this selection.</p>';
+    element.setAttribute("aria-label", "No saved percentages available");
+    return;
+  }
+  const width = 760, height = 260, left = 42, right = 18, top = 18, bottom = 64;
+  const x = (index) => left + (series.length <= 1 ? (width - left - right) / 2 : index * (width - left - right) / (series.length - 1));
+  const y = (value) => top + (100 - value) * (height - top - bottom) / 100;
+  const grid = [0, 25, 50, 75, 100].map((value) => `<g><line x1="${left}" y1="${y(value)}" x2="${width - right}" y2="${y(value)}" class="progress-gridline"/><text x="${left - 8}" y="${y(value) + 4}" text-anchor="end" class="progress-axis-label">${value}%</text></g>`).join("");
+  const links = valid.slice(1).map((point, index) => {
+    const previous = valid[index];
+    return point.index === previous.index + 1 ? `<line x1="${x(previous.index)}" y1="${y(previous.value)}" x2="${x(point.index)}" y2="${y(point.value)}" class="progress-line"/>` : "";
+  }).join("");
+  const dots = valid.map((point) => `<circle cx="${x(point.index)}" cy="${y(point.value)}" r="5" class="progress-dot"><title>${escapeHtml(point.exam.name)}: ${point.value}%</title></circle><text x="${x(point.index)}" y="${y(point.value) - 12}" text-anchor="middle" class="progress-point-label">${point.value}%</text>`).join("");
+  const labels = series.map((point, index) => `<text x="${x(index)}" y="${height - 39}" text-anchor="middle" class="progress-x-label"><tspan x="${x(index)}">${escapeHtml(point.exam.name)}</tspan><tspan x="${x(index)}" dy="13">${escapeHtml(point.exam.examDate || "Date not set")}</tspan></text>`).join("");
+  element.innerHTML = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="progress-svg-title progress-svg-desc"><title id="progress-svg-title">Student examination performance</title><desc id="progress-svg-desc">${subjectId ? "Selected subject" : "Overall average"} percentage across ${valid.length} examination${valid.length === 1 ? "" : "s"}. Missing results are left as gaps.</desc>${grid}${links}${dots}${labels}</svg>`;
+  element.setAttribute("aria-label", `${subjectId ? "Selected subject" : "Overall"} percentage chart across ${valid.length} examinations`);
+}
+
+function renderStudentProgress(data) {
+  document.querySelector("#progress-error").textContent = "";
+  document.querySelector("#progress-prompt").hidden = true;
+  document.querySelector("#progress-content").hidden = false;
+  const student = data.student;
+  const place = [student.class_name, student.section_name].filter(Boolean).join(" · ") || "Class or section not assigned";
+  document.querySelector("#progress-student-summary").innerHTML = `<strong>${escapeHtml(student.name)}</strong><span>Student ID ${escapeHtml(student.student_code)}</span><span>Roll ${escapeHtml(student.roll_number || "—")}</span><span>${escapeHtml(place)}</span>`;
+  fillDashboardFilter(document.querySelector("#progress-year"), data.academicYears, "All academic years", (year) => year.label, data.selected.academicYearId);
+  fillDashboardFilter(document.querySelector("#progress-subject"), data.subjects, "All subjects", (subject) => subject.name, data.selected.subjectId);
+  const exams = data.exams;
+  const body = document.querySelector("#progress-results");
+  body.innerHTML = exams.map((exam, index) => {
+    const yearKey = exam.academicYearId === null ? "unassigned" : String(exam.academicYearId);
+    const previousKey = index ? (exams[index - 1].academicYearId === null ? "unassigned" : String(exams[index - 1].academicYearId)) : null;
+    const yearSpan = exams.slice(index).findIndex((item) => (item.academicYearId === null ? "unassigned" : String(item.academicYearId)) !== yearKey);
+    const rowSpan = yearSpan < 0 ? exams.length - index : yearSpan;
+    const subjects = exam.subjects.length ? exam.subjects.map((subject) =>
+      `<li><span>${escapeHtml(subject.name)}</span><strong>${subject.status === "Missing" ? "Missing" : `${progressNumber(subject.score)} / ${progressNumber(subject.maximumMarks)} (${subject.percentage}%)`}</strong></li>`
+    ).join("") : '<li><span>No matching subject</span><strong>—</strong></li>';
+    const yearCell = previousKey === yearKey ? "" : `<td rowspan="${rowSpan}">${escapeHtml(exam.academicYear)}</td>`;
+    return `<tr>${yearCell}<td>${escapeHtml(exam.name)} <small class="exam-key">Exam ${exam.examId}</small></td><td>${escapeHtml(exam.examDate || "Date not set")}</td><td><ul class="progress-subject-list">${subjects}</ul></td><td>${exam.overallPercentage === null ? "—" : `${exam.overallPercentage}%`}</td></tr>`;
+  }).join("");
+  const empty = document.querySelector("#progress-empty");
+  empty.hidden = exams.length > 0;
+  empty.textContent = exams.length ? "" : "No saved examination results match this academic year. Save marks for this student to see their progress.";
+  document.querySelector(".progress-table-wrap").hidden = exams.length === 0;
+  renderProgressChart(exams, data.selected.subjectId);
+  document.querySelector("#progress-chart-note").textContent = exams.length === 0
+    ? "No examination history is available for this selection."
+    : exams.length === 1 ? "Only one examination has saved result rows, so a trend cannot yet be compared." : "Each point uses percentages so different subject maximums can be compared. Missing values are not plotted.";
+}
+
+async function loadStudentProgress() {
+  const studentId = document.querySelector("#progress-student").value;
+  const error = document.querySelector("#progress-error");
+  if (!studentId) {
+    document.querySelector("#progress-content").hidden = true;
+    document.querySelector("#progress-prompt").hidden = false;
+    error.textContent = "";
+    return;
+  }
+  const query = new URLSearchParams();
+  for (const [selector, key] of [["#progress-year", "academicYearId"], ["#progress-subject", "subjectId"]]) {
+    const value = document.querySelector(selector).value;
+    if (value) query.set(key, value);
+  }
+  try {
+    const data = await fetchJson(`/api/students/${encodeURIComponent(studentId)}/progress${query.size ? `?${query}` : ""}`);
+    renderStudentProgress(data);
+  } catch (problem) {
+    error.textContent = problem.message;
+  }
+}
+
 document.querySelector("#dashboard-filters").addEventListener("submit", (event) => {
   event.preventDefault();
   loadDashboard();
@@ -740,6 +845,22 @@ document.querySelector("#student-search").addEventListener("input", () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(searchStudents, 200);
 });
+let progressSearchTimer = null;
+document.querySelector("#progress-search").addEventListener("input", () => {
+  clearTimeout(progressSearchTimer);
+  progressSearchTimer = setTimeout(async () => {
+    try {
+      await loadProgressStudents();
+      await loadStudentProgress();
+    } catch (problem) {
+      document.querySelector("#progress-error").textContent = problem.message;
+    }
+  }, 200);
+});
+document.querySelector("#progress-student").addEventListener("change", loadStudentProgress);
+for (const selector of ["#progress-year", "#progress-subject"]) {
+  document.querySelector(selector).addEventListener("change", loadStudentProgress);
+}
 for (const selector of ["#student-year-filter", "#student-class-filter", "#student-section-filter", "#student-status-filter"]) {
   document.querySelector(selector).addEventListener("change", searchStudents);
 }
@@ -754,3 +875,6 @@ if (window.location.protocol === "file:") {
 }
 refreshStudents();
 loadDashboard();
+loadProgressStudents().catch((problem) => {
+  document.querySelector("#progress-error").textContent = problem.message;
+});

@@ -701,6 +701,143 @@ def create_app(test_config=None):
             **analysis,
         )
 
+    @app.get("/api/student-progress/students")
+    def student_progress_students():
+        """Return minimal student identifiers for the progress-page selector."""
+        search = request.args.get("search", "").strip()
+        if len(search) > 100:
+            return _error("Search text must be 100 characters or fewer.", 400)
+        sql = """SELECT st.id, st.student_code, st.name,
+                        COALESCE(en.roll_number, st.roll_number) AS roll_number,
+                        COALESCE(cl.name, legacy_class.name) AS class_name,
+                        COALESCE(se.name, legacy_section.name) AS section_name
+                 FROM students AS st
+                 LEFT JOIN academic_years AS current_year
+                   ON current_year.school_id = st.school_id AND current_year.is_current = 1
+                 LEFT JOIN student_enrollments AS en
+                   ON en.student_id = st.id AND en.academic_year_id = current_year.id
+                   AND en.status = 'active'
+                 LEFT JOIN classes AS cl ON cl.id = en.class_id
+                 LEFT JOIN sections AS se ON se.id = en.section_id
+                 LEFT JOIN classes AS legacy_class ON legacy_class.id = st.class_id
+                 LEFT JOIN sections AS legacy_section ON legacy_section.id = st.section_id
+                 WHERE st.school_id = ? AND st.is_active = 1"""
+        parameters = [SCHOOL_ID]
+        if search:
+            pattern = f"%{search}%"
+            sql += " AND (st.name LIKE ? OR st.student_code LIKE ? OR COALESCE(en.roll_number, st.roll_number, '') LIKE ?)"
+            parameters.extend([pattern, pattern, pattern])
+        sql += " ORDER BY st.name COLLATE NOCASE, st.student_code COLLATE NOCASE"
+        rows = _get_database().execute(sql, parameters).fetchall()
+        return jsonify(students=[dict(row) for row in rows])
+
+    @app.get("/api/students/<int:student_id>/progress")
+    def student_progress(student_id):
+        """Return one student's saved exam history without private profile fields."""
+        connection = _get_database()
+        student = connection.execute(
+            """SELECT st.id, st.student_code, st.name,
+                      COALESCE(en.roll_number, st.roll_number) AS roll_number,
+                      COALESCE(cl.name, legacy_class.name) AS class_name,
+                      COALESCE(se.name, legacy_section.name) AS section_name
+               FROM students AS st
+               LEFT JOIN academic_years AS current_year
+                 ON current_year.school_id = st.school_id AND current_year.is_current = 1
+               LEFT JOIN student_enrollments AS en
+                 ON en.student_id = st.id AND en.academic_year_id = current_year.id
+                 AND en.status = 'active'
+               LEFT JOIN classes AS cl ON cl.id = en.class_id
+               LEFT JOIN sections AS se ON se.id = en.section_id
+               LEFT JOIN classes AS legacy_class ON legacy_class.id = st.class_id
+               LEFT JOIN sections AS legacy_section ON legacy_section.id = st.section_id
+               WHERE st.id = ? AND st.school_id = ?""",
+            (student_id, SCHOOL_ID),
+        ).fetchone()
+        if student is None:
+            return _error("Student not found.", 404)
+
+        years = connection.execute(
+            "SELECT id, label, starts_on, ends_on FROM academic_years WHERE school_id = ? ORDER BY starts_on, label COLLATE NOCASE",
+            (SCHOOL_ID,),
+        ).fetchall()
+        raw_year_id = request.args.get("academicYearId", "").strip()
+        year_id = _optional_positive_id(raw_year_id) if raw_year_id else None
+        if raw_year_id and year_id is None:
+            return _error("Academic year ID must be a positive whole number.", 400)
+        if year_id and not any(year["id"] == year_id for year in years):
+            return _error("Academic year not found.", 400)
+
+        raw_subject_id = request.args.get("subjectId", "").strip()
+        subject_id = _optional_positive_id(raw_subject_id) if raw_subject_id else None
+        if raw_subject_id and subject_id is None:
+            return _error("Subject ID must be a positive whole number.", 400)
+        if subject_id and not connection.execute(
+            "SELECT 1 FROM subjects WHERE id = ? AND school_id = ?", (subject_id, SCHOOL_ID)
+        ).fetchone():
+            return _error("Subject not found.", 400)
+
+        exam_sql = """SELECT DISTINCT ex.id, ex.name, ex.exam_date, ex.created_at,
+                               ex.academic_year_id, ay.label AS academic_year,
+                               ay.starts_on AS academic_year_starts
+                        FROM exams AS ex
+                        JOIN exam_subjects AS es ON es.exam_id = ex.id
+                        JOIN marks AS m ON m.exam_subject_id = es.id AND m.student_id = ?
+                        LEFT JOIN academic_years AS ay ON ay.id = ex.academic_year_id
+                        WHERE ex.school_id = ?"""
+        exam_parameters = [student_id, SCHOOL_ID]
+        if year_id:
+            exam_sql += " AND ex.academic_year_id = ?"
+            exam_parameters.append(year_id)
+        exam_sql += " ORDER BY COALESCE(ay.starts_on, ex.exam_date, ex.created_at), ex.exam_date, ex.created_at, ex.id"
+        exam_rows = connection.execute(exam_sql, exam_parameters).fetchall()
+
+        exams = []
+        subject_options = connection.execute(
+            """SELECT DISTINCT su.id, su.name FROM subjects AS su
+               JOIN exam_subjects AS es ON es.subject_id = su.id
+               JOIN exams AS ex ON ex.id = es.exam_id
+               JOIN marks AS m ON m.exam_subject_id = es.id AND m.student_id = ?
+               WHERE su.school_id = ? ORDER BY su.name COLLATE NOCASE, su.id""",
+            (student_id, SCHOOL_ID),
+        ).fetchall()
+        for exam in exam_rows:
+            subject_rows = connection.execute(
+                """SELECT su.id AS subject_id, su.name AS subject_name,
+                          es.id AS exam_subject_id, es.maximum_marks, es.passing_marks, m.score
+                   FROM exam_subjects AS es JOIN subjects AS su ON su.id = es.subject_id
+                   LEFT JOIN marks AS m ON m.exam_subject_id = es.id AND m.student_id = ?
+                   WHERE es.exam_id = ? ORDER BY su.name COLLATE NOCASE, su.id""",
+                (student_id, exam["id"]),
+            ).fetchall()
+            subjects = []
+            valid_percentages = []
+            for row in subject_rows:
+                score = row["score"]
+                valid = score is not None and 0 <= score <= row["maximum_marks"]
+                percentage = round(score / row["maximum_marks"] * 100, 2) if valid else None
+                if valid:
+                    valid_percentages.append(percentage)
+                if subject_id is None or row["subject_id"] == subject_id:
+                    subjects.append({
+                        "subjectId": row["subject_id"], "name": row["subject_name"],
+                        "score": score if valid else None,
+                        "maximumMarks": row["maximum_marks"], "passingMarks": row["passing_marks"],
+                        "percentage": percentage, "status": "Recorded" if valid else "Missing",
+                    })
+            exams.append({
+                "examId": exam["id"], "name": exam["name"], "examDate": exam["exam_date"],
+                "createdAt": exam["created_at"], "academicYearId": exam["academic_year_id"],
+                "academicYear": exam["academic_year"] or "Academic year not assigned",
+                "overallPercentage": round(sum(valid_percentages) / len(valid_percentages), 2) if valid_percentages else None,
+                "subjects": subjects,
+            })
+
+        return jsonify(
+            student=dict(student), academicYears=[dict(year) for year in years],
+            subjects=[dict(subject) for subject in subject_options],
+            exams=exams, selected={"academicYearId": year_id, "subjectId": subject_id},
+        )
+
     @app.errorhandler(404)
     def not_found(_exception):
         return _error("The requested page or record was not found.", 404)

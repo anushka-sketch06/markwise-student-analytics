@@ -34,6 +34,122 @@ class MarkwiseAppTests(unittest.TestCase):
         payload.update(overrides)
         return self.client.post("/api/students", json=payload)
 
+    def add_progress_exam(self, student_id, name, exam_date, subject_scores, academic_year_id=None):
+        """Create isolated exam history in this test's temporary database."""
+        connection = sqlite3.connect(self.database_path)
+        try:
+            year_id = academic_year_id or connection.execute(
+                "SELECT id FROM academic_years WHERE school_id = 1 AND is_current = 1"
+            ).fetchone()[0]
+            cursor = connection.execute(
+                "INSERT INTO exams(school_id, academic_year_id, name, exam_date) VALUES (1, ?, ?, ?)",
+                (year_id, name, exam_date),
+            )
+            exam_id = cursor.lastrowid
+            for subject_name, maximum, score in subject_scores:
+                subject = connection.execute(
+                    "SELECT id FROM subjects WHERE school_id = 1 AND name = ?", (subject_name,)
+                ).fetchone()
+                subject_id = subject[0] if subject else connection.execute(
+                    "INSERT INTO subjects(school_id, name) VALUES (1, ?)", (subject_name,)
+                ).lastrowid
+                exam_subject_id = connection.execute(
+                    "INSERT INTO exam_subjects(exam_id, subject_id, maximum_marks, passing_marks) VALUES (?, ?, ?, ?)",
+                    (exam_id, subject_id, maximum, min(40, maximum)),
+                ).lastrowid
+                connection.execute(
+                    "INSERT INTO marks(student_id, exam_subject_id, score) VALUES (?, ?, ?)",
+                    (student_id, exam_subject_id, score),
+                )
+            connection.commit()
+            return exam_id
+        finally:
+            connection.close()
+
+    def test_student_progress_orders_exams_normalizes_scores_and_distinguishes_missing_from_zero(self):
+        student = self.add_student(guardianContact="private guardian value").get_json()["student"]
+        self.add_progress_exam(student["id"], "Term Review 2", "2026-05-15", [
+            ("Progress Maths", 200, 100), ("Progress Science", 50, 0),
+        ])
+        self.add_progress_exam(student["id"], "Term Review 1", "2026-01-15", [
+            ("Progress Maths", 100, 80), ("Progress Science", 50, None),
+        ])
+
+        response = self.client.get(f"/api/students/{student['id']}/progress")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual([exam["examDate"] for exam in payload["exams"]], ["2026-01-15", "2026-05-15"])
+        self.assertNotEqual(payload["exams"][0]["examId"], payload["exams"][1]["examId"])
+        first, second = payload["exams"]
+        maths = next(item for item in first["subjects"] if item["name"] == "Progress Maths")
+        self.assertEqual(maths["percentage"], 80)
+        self.assertEqual(first["overallPercentage"], 80)
+        science = next(item for item in first["subjects"] if item["name"] == "Progress Science")
+        self.assertEqual(science["status"], "Missing")
+        self.assertIsNone(science["score"])
+        self.assertEqual(second["overallPercentage"], 25)
+        zero = next(item for item in second["subjects"] if item["name"] == "Progress Science")
+        self.assertEqual(zero["score"], 0)
+        self.assertEqual(zero["percentage"], 0)
+        self.assertEqual(zero["status"], "Recorded")
+        self.assertNotIn("guardian", str(payload).lower())
+        self.assertNotIn("private guardian value", str(payload))
+
+    def test_student_progress_subject_and_year_filters_and_validation(self):
+        student = self.add_student().get_json()["student"]
+        self.add_progress_exam(student["id"], "Subject Filter Exam", "2026-04-10", [
+            ("Progress Maths", 100, 75), ("Progress Science", 50, 25),
+        ])
+        years = self.client.get("/api/academic-years").get_json()["academicYears"]
+        year_id = next(year["id"] for year in years if year["is_current"])
+        connection = sqlite3.connect(self.database_path)
+        try:
+            subject_id = connection.execute(
+                "SELECT id FROM subjects WHERE name = 'Progress Maths'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+        response = self.client.get(
+            f"/api/students/{student['id']}/progress?academicYearId={year_id}&subjectId={subject_id}"
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["selected"], {"academicYearId": year_id, "subjectId": subject_id})
+        self.assertEqual(len(payload["exams"]), 1)
+        self.assertEqual([item["name"] for item in payload["exams"][0]["subjects"]], ["Progress Maths"])
+        self.assertEqual(self.client.get(f"/api/students/{student['id']}/progress?subjectId=bad").status_code, 400)
+        self.assertEqual(self.client.get(f"/api/students/{student['id']}/progress?academicYearId=99999").status_code, 400)
+
+    def test_student_progress_keeps_same_named_exams_in_different_years_separate(self):
+        student = self.add_student().get_json()["student"]
+        old_year = self.client.post("/api/academic-years", json={
+            "label": "2025-2026", "startsOn": "2025-06-01", "endsOn": "2026-05-31",
+        }).get_json()["academicYear"]
+        current_year = next(year for year in self.client.get("/api/academic-years").get_json()["academicYears"] if year["is_current"])
+        old_exam_id = self.add_progress_exam(student["id"], "Midterm", "2025-12-10", [
+            ("Yearly Maths", 100, 70),
+        ], old_year["id"])
+        current_exam_id = self.add_progress_exam(student["id"], "Midterm", "2026-10-10", [
+            ("Yearly Maths", 100, 80),
+        ], current_year["id"])
+
+        exams = self.client.get(f"/api/students/{student['id']}/progress").get_json()["exams"]
+        self.assertEqual([exam["examId"] for exam in exams], [old_exam_id, current_exam_id])
+        self.assertEqual([exam["name"] for exam in exams], ["Midterm", "Midterm"])
+        self.assertEqual([exam["academicYear"] for exam in exams], ["2025-2026", current_year["label"]])
+
+    def test_student_progress_empty_and_unknown_students(self):
+        student = self.add_student().get_json()["student"]
+        empty = self.client.get(f"/api/students/{student['id']}/progress")
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.get_json()["exams"], [])
+        self.assertEqual(self.client.get("/api/students/99999/progress").status_code, 404)
+        students = self.client.get("/api/student-progress/students?search=S-100").get_json()["students"]
+        self.assertEqual(len(students), 1)
+        self.assertNotIn("guardian_contact", students[0])
+        self.assertNotIn("admission_number", students[0])
+
     def test_student_create_list_detail_update_and_archive(self):
         created = self.add_student()
         self.assertEqual(created.status_code, 201)
