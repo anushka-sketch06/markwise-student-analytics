@@ -66,6 +66,243 @@ class MarkwiseAppTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def attendance_scope(self, student, date_value="2026-10-20", session="full_day"):
+        connection = sqlite3.connect(self.database_path)
+        try:
+            row = connection.execute(
+                """SELECT ay.id, en.class_id, en.section_id FROM students AS st
+                   JOIN student_enrollments AS en ON en.student_id = st.id
+                   JOIN academic_years AS ay ON ay.id = en.academic_year_id
+                   WHERE st.id = ? AND en.status = 'active' ORDER BY ay.is_current DESC LIMIT 1""",
+                (student["id"],),
+            ).fetchone()
+            return {"academicYearId": row[0], "classId": row[1], "sectionId": row[2],
+                    "date": date_value, "session": session}
+        finally:
+            connection.close()
+
+    def save_attendance(self, scope, records):
+        return self.client.put("/api/attendance/records", json={**scope, "records": records})
+
+    def test_attendance_create_edit_all_statuses_repeat_save_and_privacy(self):
+        student = self.add_student(guardianContact="private guardian value").get_json()["student"]
+        scope = self.attendance_scope(student)
+        roster = self.client.get("/api/attendance/roster", query_string=scope).get_json()
+        self.assertEqual(roster["total"], 1)
+        self.assertTrue(roster["students"][0]["unrecorded"])
+        self.assertIsNone(roster["students"][0]["status"])
+        self.assertNotIn("guardian_contact", str(roster))
+        self.assertNotIn("private guardian value", str(roster))
+
+        for index, status in enumerate(("present", "absent", "late", "excused")):
+            response = self.save_attendance(scope, [{"studentId": student["id"], "status": status}])
+            self.assertEqual(response.status_code, 200, response.get_json())
+            payload = response.get_json()
+            self.assertEqual(payload["created"], 1 if index == 0 else 0)
+            self.assertEqual(payload["updated"], 0 if index == 0 else 1)
+            saved = self.client.get("/api/attendance/roster", query_string=scope).get_json()["students"][0]
+            self.assertEqual(saved["status"], status)
+            self.assertFalse(saved["unrecorded"])
+
+        connection = sqlite3.connect(self.database_path)
+        try:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM attendance").fetchone()[0], 1)
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """INSERT INTO attendance(student_id, academic_year_id, class_id, section_id,
+                              attendance_date, session, status) VALUES (?, ?, ?, ?, ?, ?, 'present')""",
+                    (student["id"], scope["academicYearId"], scope["classId"], scope["sectionId"], scope["date"], scope["session"]),
+                )
+        finally:
+            connection.close()
+
+    def test_attendance_validates_dates_sessions_enrollment_and_duplicate_payloads(self):
+        student = self.add_student().get_json()["student"]
+        scope = self.attendance_scope(student)
+        invalid_date = {**scope, "date": "2026-02-30"}
+        self.assertEqual(self.client.get("/api/attendance/roster", query_string=invalid_date).status_code, 400)
+        invalid_session = {**scope, "session": "midnight"}
+        self.assertEqual(self.client.get("/api/attendance/roster", query_string=invalid_session).status_code, 400)
+        for invalid in (True, "Present", "unknown"):
+            response = self.save_attendance(scope, [{"studentId": student["id"], "status": invalid}])
+            self.assertEqual(response.status_code, 400)
+        duplicate = self.save_attendance(scope, [
+            {"studentId": student["id"], "status": "present"},
+            {"studentId": student["id"], "status": "late"},
+        ])
+        self.assertEqual(duplicate.status_code, 400)
+        wrong_section = {**scope, "sectionId": scope["sectionId"] + 1000}
+        self.assertEqual(self.client.get("/api/attendance/roster", query_string=wrong_section).status_code, 400)
+        wrong_class = {**scope, "classId": scope["classId"] + 1000}
+        rejected = self.save_attendance(wrong_class, [{"studentId": student["id"], "status": "present"}])
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(self.save_attendance({**scope, "academicYearId": 99999}, [
+            {"studentId": student["id"], "status": "present"},
+        ]).status_code, 400)
+
+    def test_attendance_roster_filters_year_class_section_and_preserves_placement_conflicts(self):
+        first = self.add_student(studentCode="ATT-1", admissionNumber="ATT-ADM-1", name="First").get_json()["student"]
+        second = self.add_student(studentCode="ATT-2", admissionNumber="ATT-ADM-2", name="Second", rollNumber="13").get_json()["student"]
+        first_scope = self.attendance_scope(first)
+        second_scope = self.attendance_scope(second)
+        self.assertEqual(first_scope["classId"], second_scope["classId"])
+        self.assertEqual(first_scope["sectionId"], second_scope["sectionId"])
+        all_students = self.client.get("/api/attendance/roster", query_string=first_scope).get_json()
+        self.assertEqual(all_students["total"], 2)
+        self.assertEqual(self.save_attendance(first_scope, [{"studentId": second["id"], "status": "present"}]).status_code, 200)
+
+        class_record = self.client.post("/api/classes", json={"name": "Attendance Other"}).get_json()["classRecord"]
+        section = self.client.post(f"/api/classes/{class_record['id']}/sections", json={"name": "Green"}).get_json()["section"]
+        year = first_scope["academicYearId"]
+        enrollment = self.client.post(f"/api/students/{second['id']}/enrollments", json={
+            "academicYearId": year, "classId": class_record["id"], "sectionId": section["id"], "status": "active",
+        })
+        self.assertEqual(enrollment.status_code, 201)
+        first_enrollment = self.client.post(f"/api/students/{first['id']}/enrollments", json={
+            "academicYearId": year, "classId": class_record["id"], "sectionId": section["id"], "status": "active",
+        })
+        self.assertEqual(first_enrollment.status_code, 201)
+        second_class_scope = {**first_scope, "classId": class_record["id"], "sectionId": section["id"]}
+        moved_roster = self.client.get("/api/attendance/roster", query_string=second_class_scope).get_json()
+        self.assertEqual(moved_roster["total"], 2)
+        moved_second = next(row for row in moved_roster["students"] if row["id"] == second["id"])
+        self.assertTrue(moved_second["lockedPlacement"])
+        self.assertEqual(moved_second["status"], "present")
+        mismatch = self.client.get("/api/attendance/roster", query_string={**first_scope, "sectionId": section["id"]})
+        self.assertEqual(mismatch.status_code, 400)
+        conflict_batch = self.save_attendance(second_class_scope, [
+            {"studentId": first["id"], "status": "late"},
+            {"studentId": second["id"], "status": "absent"},
+        ])
+        self.assertEqual(conflict_batch.status_code, 409)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM attendance WHERE student_id = ?", (first["id"],)
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM attendance").fetchone()[0], 1)
+        finally:
+            connection.close()
+
+        next_year = self.client.post("/api/academic-years", json={"label": "2030-2031"}).get_json()["academicYear"]
+        next_enrollment = self.client.post(f"/api/students/{first['id']}/enrollments", json={
+            "academicYearId": next_year["id"], "classId": first_scope["classId"],
+            "sectionId": first_scope["sectionId"], "status": "active",
+        })
+        self.assertEqual(next_enrollment.status_code, 201)
+        next_scope = {**first_scope, "academicYearId": next_year["id"]}
+        self.assertEqual(self.client.get("/api/attendance/roster", query_string=next_scope).get_json()["total"], 1)
+
+    def test_attendance_summaries_exclude_excused_and_unrecorded_and_flag_below_threshold(self):
+        first = self.add_student(studentCode="SUM-1", admissionNumber="SUM-ADM-1", name="Summary A").get_json()["student"]
+        second = self.add_student(studentCode="SUM-2", admissionNumber="SUM-ADM-2", name="Summary B", rollNumber="13").get_json()["student"]
+        base = self.attendance_scope(first)
+        for day, status in (("2026-10-20", "present"), ("2026-10-21", "late"),
+                            ("2026-10-22", "absent"), ("2026-10-23", "excused")):
+            response = self.save_attendance({**base, "date": day}, [{"studentId": first["id"], "status": status}])
+            self.assertEqual(response.status_code, 200, response.get_json())
+        second_scope = self.attendance_scope(second, "2026-10-20")
+        self.assertEqual(self.save_attendance(second_scope, [{"studentId": second["id"], "status": "absent"}]).status_code, 200)
+
+        summary = self.client.get("/api/attendance/summary", query_string={
+            "academicYearId": base["academicYearId"], "classId": base["classId"],
+            "sectionId": base["sectionId"], "threshold": "75",
+        })
+        self.assertEqual(summary.status_code, 200, summary.get_json())
+        payload = summary.get_json()["summary"]
+        first_result = next(item for item in payload["students"] if item["id"] == first["id"])
+        second_result = next(item for item in payload["students"] if item["id"] == second["id"])
+        self.assertEqual(first_result["attendancePercentage"], 66.67)
+        self.assertEqual(first_result["countableSessions"], 3)
+        self.assertEqual(first_result["excused"], 1)
+        self.assertEqual(second_result["attendancePercentage"], 0)
+        self.assertTrue(second_result["belowThreshold"])
+        self.assertEqual(payload["class"]["attendancePercentage"], 50)
+        self.assertEqual(payload["class"]["studentsBelowThreshold"], 2)
+        threshold_boundary = self.client.get("/api/attendance/summary", query_string={
+            "academicYearId": base["academicYearId"], "classId": base["classId"],
+            "sectionId": base["sectionId"], "threshold": "0",
+        }).get_json()["summary"]
+        boundary_second = next(item for item in threshold_boundary["students"] if item["id"] == second["id"])
+        self.assertFalse(boundary_second["belowThreshold"], "A score equal to threshold is not below it.")
+        one_day = self.client.get("/api/attendance/summary", query_string={
+            "academicYearId": base["academicYearId"], "classId": base["classId"],
+            "sectionId": base["sectionId"], "fromDate": "2026-10-20", "toDate": "2026-10-20",
+        }).get_json()["summary"]
+        self.assertEqual(one_day["class"]["attendancePercentage"], 50)
+
+        no_records = self.add_student(studentCode="SUM-3", admissionNumber="SUM-ADM-3", name="No Data", rollNumber="14").get_json()["student"]
+        no_data = self.client.get(f"/api/students/{no_records['id']}/attendance", query_string={
+            "academicYearId": base["academicYearId"],
+        }).get_json()["summary"]
+        self.assertIsNone(no_data["attendancePercentage"])
+        self.assertFalse(no_data["belowThreshold"])
+        only_excused = self.client.get(f"/api/students/{first['id']}/attendance", query_string={
+            "academicYearId": base["academicYearId"], "fromDate": "2026-10-23", "toDate": "2026-10-23",
+        }).get_json()["summary"]
+        self.assertIsNone(only_excused["attendancePercentage"])
+        self.assertEqual(only_excused["excused"], 1)
+
+    def test_attendance_threshold_date_range_persistence_and_summary_privacy(self):
+        student = self.add_student(guardianContact="private guardian value").get_json()["student"]
+        scope = self.attendance_scope(student)
+        self.assertEqual(self.save_attendance(scope, [{"studentId": student["id"], "status": "late"}]).status_code, 200)
+        invalid_threshold = self.client.get("/api/attendance/summary", query_string={
+            "academicYearId": scope["academicYearId"], "threshold": "101",
+        })
+        self.assertEqual(invalid_threshold.status_code, 400)
+        invalid_range = self.client.get("/api/attendance/summary", query_string={
+            "academicYearId": scope["academicYearId"], "fromDate": "2026-12-01", "toDate": "2026-11-01",
+        })
+        self.assertEqual(invalid_range.status_code, 400)
+        restarted = create_app({"TESTING": True, "DATABASE": str(self.database_path)}).test_client()
+        summary = restarted.get(f"/api/students/{student['id']}/attendance?academicYearId={scope['academicYearId']}")
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(summary.get_json()["summary"]["attendancePercentage"], 100)
+        self.assertNotIn("guardian_contact", str(summary.get_json()))
+        self.assertNotIn("private guardian value", str(summary.get_json()))
+
+    def test_attendance_version_five_migration_preserves_unassigned_legacy_records(self):
+        old_database = Path(self.temporary_directory.name) / "attendance-v4.sqlite3"
+        schema = SCHEMA_FILE.read_text(encoding="utf-8")
+        schema = schema.replace("    academic_year_id INTEGER REFERENCES academic_years(id) ON DELETE RESTRICT,\n    class_id INTEGER REFERENCES classes(id) ON DELETE RESTRICT,\n    section_id INTEGER REFERENCES sections(id) ON DELETE RESTRICT,\n", "")
+        schema = schema.replace("CREATE INDEX IF NOT EXISTS attendance_scope_date\n    ON attendance(academic_year_id, class_id, section_id, attendance_date);\n", "")
+        connection = sqlite3.connect(old_database)
+        try:
+            connection.executescript(schema)
+            connection.execute("INSERT INTO schema_migrations(version) VALUES (1)")
+            connection.execute("PRAGMA user_version = 1")
+            connection.execute("INSERT INTO schools(id, name) VALUES (1, 'Test School')")
+            class_id = connection.execute("INSERT INTO classes(school_id, name) VALUES (1, 'Legacy Class')").lastrowid
+            student_id = connection.execute(
+                "INSERT INTO students(school_id, student_code, name, class_id) VALUES (1, 'LEG-1', 'Legacy Student', ?)",
+                (class_id,),
+            ).lastrowid
+            connection.execute(
+                "INSERT INTO attendance(student_id, attendance_date, session, status) VALUES (?, '2025-09-01', 'full_day', 'present')",
+                (student_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        initialize_database(old_database)
+        connection = sqlite3.connect(old_database)
+        try:
+            row = connection.execute(
+                "SELECT student_id, attendance_date, session, status, academic_year_id, class_id, section_id FROM attendance"
+            ).fetchone()
+            self.assertEqual(row, (student_id, "2025-09-01", "full_day", "present", None, None, None))
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            indexes = {item[1] for item in connection.execute("PRAGMA index_list(attendance)")}
+            self.assertIn("attendance_scope_date", indexes)
+            foreign_tables = {item[2] for item in connection.execute("PRAGMA foreign_key_list(attendance)")}
+            self.assertTrue({"academic_years", "classes", "sections", "students", "staff"}.issubset(foreign_tables))
+        finally:
+            connection.close()
+
     def test_student_progress_orders_exams_normalizes_scores_and_distinguishes_missing_from_zero(self):
         student = self.add_student(guardianContact="private guardian value").get_json()["student"]
         self.add_progress_exam(student["id"], "Term Review 2", "2026-05-15", [
@@ -575,8 +812,8 @@ class MarkwiseAppTests(unittest.TestCase):
             trigger_names = {row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'trigger'"
             ).fetchall()}
-            self.assertEqual(versions, [1, 2, 3, 4])
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(versions, [1, 2, 3, 4, 5])
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
             self.assertIn("student_section_matches_class_on_insert", trigger_names)
         finally:
             connection.close()
@@ -585,6 +822,8 @@ class MarkwiseAppTests(unittest.TestCase):
         with self.client.get("/") as page:
             self.assertEqual(page.status_code, 200)
             self.assertIn(b"markwise", page.data.lower())
+            self.assertIn(b"href=\"#attendance\"", page.data)
+            self.assertIn(b"Attendance", page.data)
             self.assertIn(b"Current active setup", page.data)
             self.assertIn(b"Unused setup records", page.data)
             self.assertIn(b"unused-class-list", page.data)

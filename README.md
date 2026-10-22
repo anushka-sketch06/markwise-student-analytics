@@ -1,8 +1,8 @@
 # Markwise School Management System
 
-Markwise is being expanded from a student marks analyzer into a school management system. Phase 3 added student profiles, academic years, classes, sections, and year-based enrollment history; Phase 4 adds database-backed academic analytics and a dashboard to the existing Flask and SQLite app.
+Markwise is being expanded from a student marks analyzer into a school management system. It preserves the existing HTML, CSS, JavaScript, Flask, and SQLite application while adding student profiles, academic-year enrollment, academic analytics, and attendance.
 
-## Current features (Phase 4)
+## Current features (Phases 3–5B)
 
 - Add, view, edit, archive, and search students by name, student ID, admission number, or roll number.
 - Store admission number, guardian name and contact, admission date, and enrollment status in student profiles.
@@ -21,6 +21,9 @@ Markwise is being expanded from a student marks analyzer into a school managemen
 - Filter analytics by academic year, class, section, examination, and student name or ID.
 - Review a privacy-limited results table with marks entered, percentage, grade, result, and competition rank; guardian and admission details are not returned by the analytics API.
 - Display responsive subject, grade, pass/fail, and top-student charts using native HTML and CSS without external chart scripts.
+- Record daily attendance for an active class roster by academic year, class, section, date, and session; edit saved Present, Absent, Late, and Excused statuses.
+- Review individual and class attendance summaries, configure the low-attendance alert threshold (75% by default), and view below-threshold students.
+- Keep attendance placement snapshots so later enrollment edits do not relabel saved attendance. Legacy attendance rows with unknown placement remain unassigned.
 
 ## Individual Student Progress (Phase 5A)
 
@@ -32,7 +35,7 @@ The existing schema has no separate student-to-examination participation table. 
 
 The progress data endpoints are `GET /api/student-progress/students?search=...` (privacy-limited selector data) and `GET /api/students/<student_id>/progress?academicYearId=...&subjectId=...`. Both use parameterized queries and validate filters. No chart package, CDN, or schema migration is required.
 
-The database also has initial relational tables for subjects, exams, marks, staff, attendance, fees, payments, timetable slots, and announcements. The app manages student, academic-year, class, section, enrollment, marks, and academic analytics workflows. There are no fees, staff, attendance, timetable, or announcements workflows yet.
+The database also has initial relational tables for subjects, exams, marks, staff, fees, payments, timetable slots, and announcements. The app manages student, academic-year, class, section, enrollment, marks, academic analytics, and attendance workflows. Fees, staff, timetables, and announcements remain schema foundations without user workflows.
 
 The old command-line analyzer is still available as a separate tool; it does not write to the Markwise database.
 
@@ -57,6 +60,12 @@ The dashboard reads the selected academic year's active students and one selecte
 - Rank uses unrounded average percentages and competition ranking; tied students share a rank (1, 1, 3).
 
 The charts are rendered with semantic HTML and CSS, so no CDN, chart package, or extra setup is required. Dashboard data is served from `GET /api/dashboard/analytics`; supported query parameters are `academicYearId`, `classId`, `sectionId`, `examId`, and `search`.
+
+## Attendance rules and API
+
+Present and Late count as attended; Absent counts as missed. Excused and unrecorded sessions do not contribute to the denominator. Attendance percentage is `(Present + Late) / (Present + Late + Absent) × 100`. A student or class with no countable sessions is shown as **Not enough data**. The app does not infer attendance on weekends, holidays, or school closure days. The threshold defaults to 75% and can be changed in the Attendance view or with the API's `threshold` parameter.
+
+The Attendance page loads a selected roster with `GET /api/attendance/roster`, saves or edits a batch with `PUT /api/attendance/records`, and displays class summaries with `GET /api/attendance/summary`. Individual history is available through `GET /api/students/<student_id>/attendance`. Roster, date, session, status, enrollment, and threshold values are validated by Flask; SQL uses bound parameters and saves are transactional. The API is for the existing local-only app. There is no sign-in or role-based authorization, so do not expose it to a network or treat it as an authenticated multi-user system.
 
 ## Install and run on Windows PowerShell
 
@@ -95,7 +104,7 @@ From the project root, while the virtual environment is available:
 \.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The tests cover student create/list/detail/update/archive, duplicate IDs and roll numbers, input validation, SQL-safe search, marks validation and calculations, persistence across app restarts, database initialization and migration, dashboard empty states and filters, configured pass boundaries, missing marks, different subject maximums, historical exams, tied ranks, analytics privacy, individual progress history with multiple exams, different maxima, subject/year filters, chronological ordering, zero versus missing marks, empty/unknown students, serving the existing page assets, and safe database errors.
+The tests cover student create/list/detail/update/archive, duplicate IDs and roll numbers, input validation, SQL-safe search, marks validation and calculations, persistence across app restarts, database initialization and migration, dashboard empty states and filters, configured pass boundaries, missing marks, different subject maximums, historical exams, tied ranks, analytics privacy, individual progress history with multiple exams, different maxima, subject/year filters, chronological ordering, zero versus missing marks, attendance statuses, edits and repeat saves, validation, enrollment filters, percentage rules, threshold alerts, migration safety, persistence, privacy, empty data, serving the existing page assets, and safe database errors.
 
 ## Existing Python command-line analyzer
 
@@ -111,9 +120,9 @@ It collects marks interactively and can save a CSV in the current folder. It is 
 
 `students` belong to a school. `classes` belong to the school and `sections` belong to classes. `student_enrollments` connects a student to a class, optional section, roll number, status, and academic year. A student can have one enrollment per year, retaining prior-year placement when a new year's assignment is added. Each admission number is unique per school; student IDs remain unique. `exams` connect to `subjects` through `exam_subjects`, where maximum and passing marks are stored. `marks` connect one student to one exam subject; a `NULL` score means not entered, while `0` is a real mark.
 
-Migration history is stored in `schema_migrations` and mirrored in SQLite's `PRAGMA user_version`. Migration 4 is defined in `migrations/0004_student_profiles_enrollments.sql`. It adds admission number, guardian name/contact, admission date, and enrollment status; gives existing students `LEGACY-<student row id>` admission numbers; adds uniqueness and enrollment indexes; and rejects enrollment sections that do not belong to the selected class. It does not modify existing student IDs, marks, exams, or subjects. Initialization creates a current year labeled for the current calendar year and snapshots existing class/section assignments into enrollment rows. Before migrating an important database, make a separate copy and verify it with `PRAGMA integrity_check`.
+Migration history is stored in `schema_migrations` and mirrored in SQLite's `PRAGMA user_version`. Migration 4 is defined in `migrations/0004_student_profiles_enrollments.sql`. It adds admission number, guardian name/contact, admission date, and enrollment status; gives existing students `LEGACY-<student row id>` admission numbers; adds uniqueness and enrollment indexes; and rejects enrollment sections that do not belong to the selected class. Migration 5 adds nullable academic-year, class, and section references to attendance, checks placement consistency, and adds a summary lookup index. Legacy attendance rows are left unassigned rather than receiving guessed placement. Existing student IDs, marks, exams, subjects, and attendance statuses are preserved. Initialization creates a current year labeled for the current calendar year and snapshots existing class/section assignments into enrollment rows. Before migrating an important database, make a separate copy and verify it with `PRAGMA integrity_check`.
 
-Future school tables connect staff to school records, attendance to students and staff, student fees to fee types and academic years, payments to fees, timetable slots to sections/subjects/staff, and announcements to a school or section. These modules are schema foundations only; they have no user interface or operations yet.
+Future school tables connect staff to school records, payments to student fees, timetable slots to sections/subjects/staff, and announcements to a school or section. These modules are schema foundations only; they have no user interface or operations yet.
 
 Student removal is an archive (`is_active = 0`) so saved marks and historical enrollments are not destroyed. Archived records are hidden from the active student search and analysis selectors. A future records-management phase can add restoration and access controls.
 

@@ -66,10 +66,29 @@ def initialize_database(database_path):
                        SELECT RAISE(ABORT, 'student section must belong to selected class');
                    END;""",
             4: (ROOT / "migrations" / "0004_student_profiles_enrollments.sql").read_text(encoding="utf-8"),
+            5: (ROOT / "migrations" / "0005_attendance_placement.sql").read_text(encoding="utf-8"),
         }
         for version, migration_sql in migrations.items():
             if current_version >= version:
                 continue
+            if version == 5:
+                # schema.sql contains the latest table shape for new databases.
+                # Older databases receive these nullable columns here; legacy
+                # attendance rows stay NULL rather than gaining guessed placement.
+                existing_columns = {
+                    row["name"] for row in connection.execute("PRAGMA table_info(attendance)")
+                }
+                new_columns = {
+                    "academic_year_id": "INTEGER REFERENCES academic_years(id) ON DELETE RESTRICT",
+                    "class_id": "INTEGER REFERENCES classes(id) ON DELETE RESTRICT",
+                    "section_id": "INTEGER REFERENCES sections(id) ON DELETE RESTRICT",
+                }
+                add_columns = "\n".join(
+                    f"ALTER TABLE attendance ADD COLUMN {name} {definition};"
+                    for name, definition in new_columns.items()
+                    if name not in existing_columns
+                )
+                migration_sql = add_columns + "\n" + migration_sql
             try:
                 connection.executescript(
                     "BEGIN IMMEDIATE;\n"

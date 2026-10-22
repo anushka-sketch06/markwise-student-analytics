@@ -849,6 +849,179 @@ def create_app(test_config=None):
             exams=exams, selected={"academicYearId": year_id, "subjectId": subject_id},
         )
 
+    @app.get("/api/attendance/roster")
+    def attendance_roster():
+        scope, error = _validate_attendance_scope(request.args, include_date=True, require_class=True)
+        if error:
+            return error
+        connection = _get_database()
+        error = _check_attendance_scope(connection, scope)
+        if error:
+            return error
+        sql = """SELECT st.id, st.student_code, st.name,
+                        COALESCE(en.roll_number, st.roll_number) AS roll_number,
+                        en.section_id, se.name AS section_name,
+                        att.id AS attendance_id, att.status AS attendance_status,
+                        att.academic_year_id AS saved_year_id, att.class_id AS saved_class_id,
+                        att.section_id AS saved_section_id, att.created_at AS recorded_at
+                 FROM student_enrollments AS en
+                 JOIN students AS st ON st.id = en.student_id AND st.school_id = ? AND st.is_active = 1
+                 LEFT JOIN sections AS se ON se.id = en.section_id
+                 LEFT JOIN attendance AS att ON att.student_id = st.id
+                   AND att.attendance_date = ? AND att.session = ?
+                 WHERE en.academic_year_id = ? AND en.class_id = ? AND en.status = 'active'"""
+        parameters = [SCHOOL_ID, scope["attendance_date"], scope["session"], scope["academic_year_id"], scope["class_id"]]
+        if scope["section_id"] is not None:
+            sql += " AND en.section_id = ?"
+            parameters.append(scope["section_id"])
+        sql += " ORDER BY se.name COLLATE NOCASE, COALESCE(en.roll_number, st.roll_number), st.name COLLATE NOCASE"
+        rows = connection.execute(sql, parameters).fetchall()
+        roster = []
+        for row in rows:
+            item = {
+                "id": row["id"], "studentCode": row["student_code"], "name": row["name"],
+                "rollNumber": row["roll_number"], "sectionId": row["section_id"],
+                "sectionName": row["section_name"], "attendanceId": row["attendance_id"],
+                "status": row["attendance_status"], "recordedAt": row["recorded_at"],
+                "unrecorded": row["attendance_id"] is None,
+            }
+            item["lockedPlacement"] = row["attendance_id"] is not None and (
+                row["saved_year_id"] != scope["academic_year_id"]
+                or row["saved_class_id"] != scope["class_id"]
+                or row["saved_section_id"] != row["section_id"]
+            )
+            roster.append(item)
+        return jsonify(scope=scope, students=roster, total=len(roster))
+
+    @app.put("/api/attendance/records")
+    def save_attendance_records():
+        payload, error = _read_json_object()
+        if error:
+            return error
+        scope, error = _validate_attendance_scope(payload, include_date=True, require_class=True)
+        if error:
+            return error
+        records = payload.get("records")
+        if not isinstance(records, list) or not 1 <= len(records) <= 500:
+            return _error("Submit between 1 and 500 attendance records.", 400)
+        clean_records = []
+        allowed_statuses = {"present", "absent", "late", "excused"}
+        for record in records:
+            if not isinstance(record, dict):
+                return _error("Each attendance record must be an object.", 400)
+            student_id = record.get("studentId")
+            status = record.get("status")
+            if isinstance(student_id, bool) or not isinstance(student_id, int) or student_id < 1:
+                return _error("Each attendance record needs a valid student ID.", 400)
+            if not isinstance(status, str) or status not in allowed_statuses:
+                return _error("Choose Present, Absent, Late, or Excused for every submitted student.", 400)
+            clean_records.append({"student_id": student_id, "status": status})
+        if len({record["student_id"] for record in clean_records}) != len(clean_records):
+            return _error("Submit each student only once for this date and session.", 400)
+
+        connection = _get_database()
+        error = _check_attendance_scope(connection, scope)
+        if error:
+            return error
+        student_ids = [record["student_id"] for record in clean_records]
+        placeholders = ",".join("?" for _ in student_ids)
+        created = 0
+        updated = 0
+        try:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                enrollment_rows = connection.execute(
+                    f"""SELECT en.student_id, en.section_id
+                        FROM student_enrollments AS en JOIN students AS st ON st.id = en.student_id
+                        WHERE st.school_id = ? AND st.is_active = 1 AND en.status = 'active'
+                          AND en.academic_year_id = ? AND en.class_id = ?
+                          AND (? IS NULL OR en.section_id = ?)
+                          AND en.student_id IN ({placeholders})""",
+                    [SCHOOL_ID, scope["academic_year_id"], scope["class_id"], scope["section_id"], scope["section_id"], *student_ids],
+                ).fetchall()
+                enrollment_by_student = {row["student_id"]: row["section_id"] for row in enrollment_rows}
+                if set(enrollment_by_student) != set(student_ids):
+                    raise _AttendanceEnrollmentConflict
+                for record in clean_records:
+                    section_id = enrollment_by_student[record["student_id"]]
+                    existing = connection.execute(
+                        """SELECT id, academic_year_id, class_id, section_id FROM attendance
+                           WHERE student_id = ? AND attendance_date = ? AND session = ?""",
+                        (record["student_id"], scope["attendance_date"], scope["session"]),
+                    ).fetchone()
+                    if existing and (
+                        existing["academic_year_id"] != scope["academic_year_id"]
+                        or existing["class_id"] != scope["class_id"]
+                        or existing["section_id"] != section_id
+                    ):
+                        raise _AttendancePlacementConflict
+                    connection.execute(
+                        """INSERT INTO attendance
+                               (student_id, academic_year_id, class_id, section_id,
+                                attendance_date, session, status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(student_id, attendance_date, session)
+                           DO UPDATE SET status = excluded.status
+                             WHERE attendance.academic_year_id = excluded.academic_year_id
+                               AND attendance.class_id = excluded.class_id
+                               AND attendance.section_id IS excluded.section_id""",
+                        (record["student_id"], scope["academic_year_id"], scope["class_id"], section_id,
+                         scope["attendance_date"], scope["session"], record["status"]),
+                    )
+                    if existing:
+                        updated += 1
+                    else:
+                        created += 1
+        except _AttendancePlacementConflict:
+            return _error("An existing attendance record for this student, date, and session belongs to a different or unassigned placement and was not changed.", 409)
+        except _AttendanceEnrollmentConflict:
+            return _error("One or more students are not actively enrolled in the selected class, section, and academic year.", 400)
+        except sqlite3.IntegrityError as error:
+            return _integrity_error(error)
+        return jsonify(created=created, updated=updated, saved=len(clean_records))
+
+    @app.get("/api/attendance/summary")
+    def attendance_summary():
+        scope, error = _validate_attendance_scope(request.args, include_date=False, require_class=False)
+        if error:
+            return error
+        date_range, error = _validate_attendance_date_range(request.args)
+        if error:
+            return error
+        threshold, error = _attendance_threshold(request.args.get("threshold", "75"))
+        if error:
+            return error
+        connection = _get_database()
+        error = _check_attendance_scope(connection, scope)
+        if error:
+            return error
+        summary = _build_attendance_summary(connection, scope, date_range, threshold)
+        return jsonify(summary=summary, threshold=threshold, dateRange=date_range)
+
+    @app.get("/api/students/<int:student_id>/attendance")
+    def individual_attendance_summary(student_id):
+        scope, error = _validate_attendance_scope(request.args, include_date=False, require_class=False)
+        if error:
+            return error
+        date_range, error = _validate_attendance_date_range(request.args)
+        if error:
+            return error
+        threshold, error = _attendance_threshold(request.args.get("threshold", "75"))
+        if error:
+            return error
+        connection = _get_database()
+        student = connection.execute(
+            "SELECT id, student_code, name FROM students WHERE id = ? AND school_id = ?",
+            (student_id, SCHOOL_ID),
+        ).fetchone()
+        if not student:
+            return _error("Student not found.", 404)
+        error = _check_attendance_scope(connection, scope)
+        if error:
+            return error
+        result = _build_student_attendance_summary(connection, student, scope, date_range, threshold)
+        return jsonify(summary=result, threshold=threshold, dateRange=date_range)
+
     @app.errorhandler(404)
     def not_found(_exception):
         return _error("The requested page or record was not found.", 404)
@@ -1055,6 +1228,232 @@ def _optional_positive_id(value):
     except (TypeError, ValueError):
         return None
     return result if result > 0 and str(result) == str(value) else None
+
+
+class _AttendancePlacementConflict(Exception):
+    """Raised to roll back a batch if a unique-key row belongs elsewhere."""
+
+
+class _AttendanceEnrollmentConflict(Exception):
+    """Raised when the roster changes or contains an out-of-scope student."""
+
+
+def _validate_attendance_scope(source, include_date, require_class):
+    year_raw = source.get("academicYearId", "")
+    class_raw = source.get("classId", "")
+    section_raw = source.get("sectionId", "")
+    year_id = _optional_positive_id(year_raw)
+    class_id = _optional_positive_id(class_raw) if class_raw not in (None, "") else None
+    section_id = _optional_positive_id(section_raw) if section_raw not in (None, "") else None
+    if year_id is None:
+        return None, _error("Academic year ID must be a positive whole number.", 400)
+    if require_class and class_id is None:
+        return None, _error("Class ID must be a positive whole number.", 400)
+    if class_raw not in (None, "") and class_id is None:
+        return None, _error("Class ID must be a positive whole number.", 400)
+    if section_raw not in (None, "") and section_id is None:
+        return None, _error("Section ID must be a positive whole number.", 400)
+    if section_id is not None and class_id is None:
+        return None, _error("Choose a class before filtering by section.", 400)
+    scope = {"academic_year_id": year_id, "class_id": class_id, "section_id": section_id}
+    if include_date:
+        raw_date = source.get("date", "")
+        if not isinstance(raw_date, str):
+            return None, _error("Attendance date must use YYYY-MM-DD format.", 400)
+        try:
+            parsed = date.fromisoformat(raw_date)
+        except ValueError:
+            return None, _error("Attendance date must use YYYY-MM-DD format.", 400)
+        if parsed.isoformat() != raw_date:
+            return None, _error("Attendance date must use YYYY-MM-DD format.", 400)
+        scope["attendance_date"] = raw_date
+        session = source.get("session", "full_day")
+        if not isinstance(session, str) or session not in {"full_day", "morning", "afternoon"}:
+            return None, _error("Choose a valid session: full_day, morning, or afternoon.", 400)
+        scope["session"] = session
+    return scope, None
+
+
+def _check_attendance_scope(connection, scope):
+    if not connection.execute(
+        "SELECT 1 FROM academic_years WHERE id = ? AND school_id = ?",
+        (scope["academic_year_id"], SCHOOL_ID),
+    ).fetchone():
+        return _error("Academic year not found.", 400)
+    if scope["class_id"] is not None and not connection.execute(
+        "SELECT 1 FROM classes WHERE id = ? AND school_id = ?", (scope["class_id"], SCHOOL_ID)
+    ).fetchone():
+        return _error("Class not found.", 400)
+    if scope["section_id"] is not None and not connection.execute(
+        "SELECT 1 FROM sections WHERE id = ? AND class_id = ?",
+        (scope["section_id"], scope["class_id"]),
+    ).fetchone():
+        return _error("Section does not belong to the selected class.", 400)
+    return None
+
+
+def _validate_attendance_date_range(source):
+    start = source.get("fromDate", "")
+    end = source.get("toDate", "")
+    if bool(start) != bool(end):
+        return None, _error("Choose both a start and end date, or leave both blank.", 400)
+    if not start:
+        return {"fromDate": None, "toDate": None}, None
+    parsed = []
+    for value in (start, end):
+        if not isinstance(value, str):
+            return None, _error("Date filters must use YYYY-MM-DD format.", 400)
+        try:
+            candidate = date.fromisoformat(value)
+        except ValueError:
+            return None, _error("Date filters must use YYYY-MM-DD format.", 400)
+        if candidate.isoformat() != value:
+            return None, _error("Date filters must use YYYY-MM-DD format.", 400)
+        parsed.append(candidate)
+    if parsed[0] > parsed[1]:
+        return None, _error("Start date must not be after end date.", 400)
+    return {"fromDate": start, "toDate": end}, None
+
+
+def _attendance_threshold(value):
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError):
+        return None, _error("Attendance threshold must be a number from 0 to 100.", 400)
+    if not math.isfinite(threshold) or not 0 <= threshold <= 100:
+        return None, _error("Attendance threshold must be a number from 0 to 100.", 400)
+    return threshold, None
+
+
+def _attendance_filter_sql(scope, date_range, alias="att"):
+    clauses = [f"{alias}.academic_year_id = ?"]
+    parameters = [scope["academic_year_id"]]
+    if scope["class_id"] is not None:
+        clauses.append(f"{alias}.class_id = ?")
+        parameters.append(scope["class_id"])
+    if scope["section_id"] is not None:
+        clauses.append(f"{alias}.section_id = ?")
+        parameters.append(scope["section_id"])
+    if date_range["fromDate"]:
+        clauses.extend([f"{alias}.attendance_date >= ?", f"{alias}.attendance_date <= ?"])
+        parameters.extend([date_range["fromDate"], date_range["toDate"]])
+    return " AND ".join(clauses), parameters
+
+
+def _empty_attendance_counts():
+    return {"present": 0, "late": 0, "absent": 0, "excused": 0}
+
+
+def _attendance_count_result(counts):
+    attended = counts["present"] + counts["late"]
+    countable = attended + counts["absent"]
+    percentage = round(attended * 100 / countable, 2) if countable else None
+    return {
+        "present": counts["present"], "late": counts["late"], "absent": counts["absent"],
+        "excused": counts["excused"], "attendedSessions": attended,
+        "countableSessions": countable, "attendancePercentage": percentage,
+    }
+
+
+def _build_attendance_summary(connection, scope, date_range, threshold):
+    roster_sql = """SELECT st.id, st.student_code, st.name,
+                           COALESCE(en.roll_number, st.roll_number) AS roll_number,
+                           cl.name AS class_name, se.name AS section_name
+                    FROM student_enrollments AS en
+                    JOIN students AS st ON st.id = en.student_id AND st.school_id = ? AND st.is_active = 1
+                    JOIN classes AS cl ON cl.id = en.class_id
+                    LEFT JOIN sections AS se ON se.id = en.section_id
+                    WHERE en.academic_year_id = ? AND en.status = 'active'"""
+    roster_params = [SCHOOL_ID, scope["academic_year_id"]]
+    if scope["class_id"] is not None:
+        roster_sql += " AND en.class_id = ?"
+        roster_params.append(scope["class_id"])
+    if scope["section_id"] is not None:
+        roster_sql += " AND en.section_id = ?"
+        roster_params.append(scope["section_id"])
+    roster_rows = connection.execute(roster_sql, roster_params).fetchall()
+    students = {row["id"]: {
+        "id": row["id"], "studentCode": row["student_code"], "name": row["name"],
+        "rollNumber": row["roll_number"], "className": row["class_name"],
+        "sectionName": row["section_name"], "counts": _empty_attendance_counts(),
+    } for row in roster_rows}
+
+    filters, filter_params = _attendance_filter_sql(scope, date_range)
+    attendance_rows = connection.execute(
+        f"""SELECT st.id, st.student_code, st.name,
+                   MIN(cl.name) AS class_name, GROUP_CONCAT(DISTINCT se.name) AS section_names,
+                   SUM(CASE WHEN att.status = 'present' THEN 1 ELSE 0 END) AS present,
+                   SUM(CASE WHEN att.status = 'late' THEN 1 ELSE 0 END) AS late,
+                   SUM(CASE WHEN att.status = 'absent' THEN 1 ELSE 0 END) AS absent,
+                   SUM(CASE WHEN att.status = 'excused' THEN 1 ELSE 0 END) AS excused
+            FROM attendance AS att JOIN students AS st ON st.id = att.student_id
+            LEFT JOIN classes AS cl ON cl.id = att.class_id
+            LEFT JOIN sections AS se ON se.id = att.section_id
+            WHERE st.school_id = ? AND {filters}
+            GROUP BY st.id ORDER BY st.name COLLATE NOCASE""",
+        [SCHOOL_ID, *filter_params],
+    ).fetchall()
+    for row in attendance_rows:
+        student = students.setdefault(row["id"], {
+            "id": row["id"], "studentCode": row["student_code"], "name": row["name"],
+            "rollNumber": None, "className": row["class_name"],
+            "sectionName": row["section_names"], "counts": _empty_attendance_counts(),
+        })
+        student["counts"] = {key: row[key] or 0 for key in ("present", "late", "absent", "excused")}
+        student["className"] = row["class_name"] or student["className"]
+        student["sectionName"] = row["section_names"] or student["sectionName"]
+
+    results = []
+    totals = _empty_attendance_counts()
+    for student in sorted(students.values(), key=lambda item: (item["name"].casefold(), item["id"])):
+        counts = student.pop("counts")
+        result = {**student, **_attendance_count_result(counts)}
+        result["belowThreshold"] = (
+            result["attendancePercentage"] is not None
+            and result["attendancePercentage"] < threshold
+        )
+        for key in totals:
+            totals[key] += counts[key]
+        results.append(result)
+    class_result = _attendance_count_result(totals)
+    class_result.update({
+        "activeStudents": len(roster_rows),
+        "studentsWithCountableRecords": sum(item["countableSessions"] > 0 for item in results),
+        "studentsBelowThreshold": sum(item["belowThreshold"] for item in results),
+        "threshold": threshold,
+    })
+    return {"class": class_result, "students": results}
+
+
+def _build_student_attendance_summary(connection, student, scope, date_range, threshold):
+    filters, parameters = _attendance_filter_sql(scope, date_range)
+    rows = connection.execute(
+        f"""SELECT att.id, att.attendance_date, att.session, att.status,
+                   att.class_id, cl.name AS class_name, att.section_id, se.name AS section_name,
+                   att.created_at
+            FROM attendance AS att
+            LEFT JOIN classes AS cl ON cl.id = att.class_id
+            LEFT JOIN sections AS se ON se.id = att.section_id
+            WHERE att.student_id = ? AND {filters}
+            ORDER BY att.attendance_date, att.session, att.id""",
+        [student["id"], *parameters],
+    ).fetchall()
+    counts = _empty_attendance_counts()
+    sessions = []
+    for row in rows:
+        counts[row["status"]] += 1
+        sessions.append({
+            "id": row["id"], "date": row["attendance_date"], "session": row["session"],
+            "status": row["status"], "className": row["class_name"],
+            "sectionName": row["section_name"], "recordedAt": row["created_at"],
+        })
+    result = {
+        "student": {"id": student["id"], "studentCode": student["student_code"], "name": student["name"]},
+        "sessions": sessions,
+        **_attendance_count_result(counts),
+    }
+    result["belowThreshold"] = result["attendancePercentage"] is not None and result["attendancePercentage"] < threshold
+    return result
 
 
 def _sync_current_enrollment(connection, student_id, class_id, section_id, roll_number, status):

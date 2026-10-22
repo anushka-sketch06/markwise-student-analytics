@@ -141,6 +141,9 @@ CREATE TABLE IF NOT EXISTS staff (
 CREATE TABLE IF NOT EXISTS attendance (
     id INTEGER PRIMARY KEY,
     student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    academic_year_id INTEGER REFERENCES academic_years(id) ON DELETE RESTRICT,
+    class_id INTEGER REFERENCES classes(id) ON DELETE RESTRICT,
+    section_id INTEGER REFERENCES sections(id) ON DELETE RESTRICT,
     attendance_date TEXT NOT NULL,
     session TEXT NOT NULL DEFAULT 'full_day',
     status TEXT NOT NULL CHECK (status IN ('present', 'absent', 'late', 'excused')),
@@ -148,6 +151,8 @@ CREATE TABLE IF NOT EXISTS attendance (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (student_id, attendance_date, session)
 );
+CREATE INDEX IF NOT EXISTS attendance_scope_date
+    ON attendance(academic_year_id, class_id, section_id, attendance_date);
 
 CREATE TABLE IF NOT EXISTS fee_types (
     id INTEGER PRIMARY KEY,

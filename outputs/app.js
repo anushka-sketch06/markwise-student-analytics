@@ -801,6 +801,159 @@ async function loadStudentProgress() {
   }
 }
 
+let attendanceClasses = [];
+let attendanceSections = [];
+let loadedAttendance = [];
+function attendanceQuery(includeDate = true) {
+  const query = new URLSearchParams({
+    academicYearId: document.querySelector("#attendance-year").value,
+    classId: document.querySelector("#attendance-class").value,
+    threshold: document.querySelector("#attendance-threshold").value,
+  });
+  const sectionId = document.querySelector("#attendance-section").value;
+  if (sectionId) query.set("sectionId", sectionId);
+  if (includeDate) {
+    query.set("date", document.querySelector("#attendance-date").value);
+    query.set("session", document.querySelector("#attendance-session").value);
+  }
+  return query;
+}
+
+function fillAttendanceSections() {
+  const classId = document.querySelector("#attendance-class").value;
+  const filtered = attendanceSections.filter((section) => !classId || section.class_id === Number(classId));
+  const select = document.querySelector("#attendance-section");
+  const previous = select.value;
+  select.innerHTML = '<option value="">All sections</option>' + filtered.map((section) =>
+    `<option value="${section.id}">${escapeHtml(section.name)}</option>`).join("");
+  if (filtered.some((section) => String(section.id) === previous)) select.value = previous;
+}
+
+async function loadAttendanceOptions() {
+  const [yearsData, classesData, sectionsData] = await Promise.all([
+    fetchJson("/api/academic-years"), fetchJson("/api/classes"), fetchJson("/api/sections"),
+  ]);
+  attendanceClasses = classesData.classes;
+  attendanceSections = sectionsData.sections;
+  const yearSelect = document.querySelector("#attendance-year");
+  fillSelect("#attendance-year", yearsData.academicYears, "Choose year", (year) => year.label);
+  if (!yearSelect.value) {
+    const current = yearsData.academicYears.find((year) => year.is_current);
+    if (current) yearSelect.value = String(current.id);
+  }
+  fillSelect("#attendance-class", attendanceClasses, "Choose class", (record) => record.name);
+  fillAttendanceSections();
+  const now = new Date();
+  const localDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  document.querySelector("#attendance-date").value ||= localDate;
+}
+
+function percentageLabel(value) {
+  return value === null ? "Not enough data" : `${Number(value).toFixed(2).replace(/\.00$/, "")}%`;
+}
+
+function renderAttendanceSummary(summary, threshold) {
+  const stats = summary.class;
+  document.querySelector("#attendance-class-rate").textContent = percentageLabel(stats.attendancePercentage);
+  document.querySelector("#attendance-active-count").textContent = stats.activeStudents;
+  document.querySelector("#attendance-recorded-count").textContent = stats.studentsWithCountableRecords;
+  document.querySelector("#attendance-below-count").textContent = stats.studentsBelowThreshold;
+  const below = summary.students.filter((student) => student.belowThreshold);
+  const alert = document.querySelector("#attendance-low-alert");
+  alert.hidden = below.length === 0;
+  alert.textContent = below.length
+    ? `Below ${percentageLabel(threshold)}: ${below.map((student) => `${student.name} (${percentageLabel(student.attendancePercentage)})`).join(", ")}`
+    : `No students with countable records are below ${percentageLabel(threshold)}.`;
+  const summaryById = new Map(summary.students.map((student) => [student.id, student]));
+  document.querySelectorAll("#attendance-roster tr[data-student-id]").forEach((row) => {
+    const student = summaryById.get(Number(row.dataset.studentId));
+    row.querySelector("[data-attendance-percent]").textContent = percentageLabel(student?.attendancePercentage ?? null);
+  });
+}
+
+function renderAttendanceRoster(data) {
+  loadedAttendance = data.students;
+  const body = document.querySelector("#attendance-roster");
+  const empty = document.querySelector("#attendance-roster-empty");
+  const wrap = document.querySelector("#attendance-roster-wrap");
+  body.innerHTML = data.students.map((student) => {
+    const options = [["", "Not recorded"], ["present", "Present"], ["absent", "Absent"], ["late", "Late"], ["excused", "Excused"]]
+      .map(([value, label]) => `<option value="${value}"${student.status === value ? " selected" : ""}${!value && student.status ? " disabled" : ""}>${label}</option>`).join("");
+    const note = student.lockedPlacement ? "Saved under a different or unassigned placement; this record is locked here."
+      : student.unrecorded ? "Unrecorded · not an absence" : "Saved";
+    const noteClass = student.lockedPlacement ? "locked" : student.unrecorded ? "" : "saved";
+    return `<tr data-student-id="${student.id}"><td>${escapeHtml(student.name)}<small class="attendance-status-note">${student.rollNumber ? `Roll ${escapeHtml(student.rollNumber)}` : ""}</small></td><td>${escapeHtml(student.studentCode)}</td><td>${escapeHtml(student.sectionName || "—")}</td><td><select class="attendance-status" data-student-id="${student.id}" aria-label="Attendance status for ${escapeHtml(student.name)}"${student.lockedPlacement ? " disabled" : ""}>${options}</select><small class="attendance-status-note ${noteClass}" data-status-note>${note}</small></td><td data-attendance-percent>Not enough data</td><td><button type="button" class="text-button attendance-details" data-student-id="${student.id}">View summary</button></td></tr>`;
+  }).join("");
+  empty.hidden = data.students.length > 0;
+  empty.textContent = data.students.length ? "" : "No active students are enrolled in the selected class, section, and academic year.";
+  wrap.hidden = data.students.length === 0;
+  document.querySelector("#attendance-save-state").textContent = "Unrecorded students are left blank; they are not marked absent.";
+}
+
+async function loadAttendance(discardUnsaved = false) {
+  const message = document.querySelector("#attendance-message");
+  const form = document.querySelector("#attendance-filters");
+  if (!form.reportValidity()) return;
+  const hasUnsaved = [...document.querySelectorAll("#attendance-roster .attendance-status-note.dirty")].length > 0;
+  if (hasUnsaved && !discardUnsaved && !window.confirm("Discard unsaved attendance changes and load this selection?")) return;
+  message.textContent = "Loading attendance…";
+  try {
+    const query = attendanceQuery(true);
+    const [roster, result] = await Promise.all([
+      fetchJson(`/api/attendance/roster?${query}`),
+      fetchJson(`/api/attendance/summary?${attendanceQuery(false)}`),
+    ]);
+    renderAttendanceRoster(roster);
+    renderAttendanceSummary(result.summary, result.threshold);
+    message.textContent = `Loaded ${roster.total} student${roster.total === 1 ? "" : "s"}. Previously saved statuses are shown.`;
+    document.querySelector("#attendance-individual").hidden = true;
+  } catch (problem) {
+    message.textContent = problem.message;
+    document.querySelector("#attendance-roster-wrap").hidden = true;
+  }
+}
+
+async function saveAttendance() {
+  const message = document.querySelector("#attendance-message");
+  const records = [...document.querySelectorAll("#attendance-roster .attendance-status")]
+    .filter((select) => !select.disabled && select.value)
+    .map((select) => ({ studentId: Number(select.dataset.studentId), status: select.value }));
+  if (!records.length) {
+    message.textContent = "Choose a status for at least one student before saving.";
+    return;
+  }
+  try {
+    const selection = attendanceQuery(true);
+    const result = await fetchJson("/api/attendance/records", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        academicYearId: Number(selection.get("academicYearId")),
+        classId: Number(selection.get("classId")),
+        sectionId: selection.has("sectionId") ? Number(selection.get("sectionId")) : null,
+        date: selection.get("date"), session: selection.get("session"), records,
+      }),
+    });
+    await loadAttendance(true);
+    message.textContent = `Saved ${result.saved} attendance record${result.saved === 1 ? "" : "s"} (${result.created} new, ${result.updated} updated).`;
+  } catch (problem) {
+    message.textContent = problem.message;
+  }
+}
+
+async function showIndividualAttendance(studentId) {
+  const query = attendanceQuery(false);
+  const panel = document.querySelector("#attendance-individual");
+  const content = document.querySelector("#attendance-individual-content");
+  try {
+    const result = await fetchJson(`/api/students/${studentId}/attendance?${query}`);
+    const summary = result.summary;
+    content.innerHTML = `<p><strong>${escapeHtml(summary.student.name)}</strong> · ${percentageLabel(summary.attendancePercentage)}</p><p>${summary.attendedSessions} attended (Present + Late) · ${summary.absent} absent · ${summary.excused} excused · ${summary.countableSessions} countable sessions</p><ul>${summary.sessions.map((session) => `<li>${escapeHtml(session.date)} · ${escapeHtml(session.session)} · ${escapeHtml(session.status)} · ${escapeHtml(session.className || "Unassigned")}${session.sectionName ? ` / ${escapeHtml(session.sectionName)}` : ""}</li>`).join("") || "<li>No recorded sessions for this academic year.</li>"}</ul>`;
+    panel.hidden = false;
+  } catch (problem) {
+    document.querySelector("#attendance-message").textContent = problem.message;
+  }
+}
+
 document.querySelector("#dashboard-filters").addEventListener("submit", (event) => {
   event.preventDefault();
   loadDashboard();
@@ -821,6 +974,34 @@ let dashboardSearchTimer = null;
 document.querySelector("#dashboard-search").addEventListener("input", () => {
   clearTimeout(dashboardSearchTimer);
   dashboardSearchTimer = setTimeout(loadDashboard, 250);
+});
+document.querySelector("#attendance-filters").addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadAttendance();
+});
+document.querySelector("#attendance-class").addEventListener("change", fillAttendanceSections);
+document.querySelector("#attendance-threshold").addEventListener("change", () => {
+  document.querySelector("#attendance-message").textContent = "Threshold changed. Load attendance to refresh summaries and alerts.";
+});
+document.querySelector("#attendance-save").addEventListener("click", saveAttendance);
+document.querySelector("#attendance-roster").addEventListener("change", (event) => {
+  if (!event.target.matches(".attendance-status")) return;
+  const note = event.target.closest("td").querySelector("[data-status-note]");
+  const original = loadedAttendance.find((student) => student.id === Number(event.target.dataset.studentId));
+  const changed = (event.target.value || null) !== (original?.status || null);
+  if (changed) {
+    note.textContent = "Unsaved change";
+    note.className = "attendance-status-note dirty";
+    document.querySelector("#attendance-save-state").textContent = "Changes are not saved yet.";
+  } else {
+    note.textContent = original?.unrecorded ? "Unrecorded · not an absence" : "Saved";
+    note.className = `attendance-status-note ${original?.unrecorded ? "" : "saved"}`;
+    document.querySelector("#attendance-save-state").textContent = "Unrecorded students are left blank; they are not marked absent.";
+  }
+});
+document.querySelector("#attendance-roster").addEventListener("click", (event) => {
+  const button = event.target.closest(".attendance-details");
+  if (button) showIndividualAttendance(Number(button.dataset.studentId));
 });
 
 document.querySelector("#academic-year-form").addEventListener("submit", (event) => {
@@ -907,4 +1088,7 @@ refreshStudents();
 loadDashboard();
 loadProgressStudents().catch((problem) => {
   document.querySelector("#progress-error").textContent = problem.message;
+});
+loadAttendanceOptions().catch((problem) => {
+  document.querySelector("#attendance-message").textContent = problem.message;
 });

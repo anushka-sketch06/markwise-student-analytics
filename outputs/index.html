@@ -17,6 +17,7 @@
   <nav class="main-nav" aria-label="Main navigation">
     <a class="active" href="#dashboard">Dashboard</a>
     <a href="#student-progress">Student Progress</a>
+    <a href="#attendance">Attendance</a>
     <a href="#student-management">Students</a>
     <a href="#analyzer">Marks analyzer</a>
     <a href="#class-management">Classes</a>
@@ -90,6 +91,38 @@
         <div class="table-wrap progress-table-wrap"><table class="results-table progress-table"><thead><tr><th scope="col">Academic year</th><th scope="col">Examination</th><th scope="col">Date</th><th scope="col">Subject results</th><th scope="col">Overall</th></tr></thead><tbody id="progress-results"></tbody></table></div>
       </div>
       <p id="progress-prompt" class="detail-empty">Choose a student to view saved examination results.</p>
+    </section>
+
+    <section id="attendance" class="students-card attendance-page" aria-labelledby="attendance-title">
+      <div class="card-heading students-card-heading"><div><p class="eyebrow">DAILY SCHOOL RECORDS</p><h2 id="attendance-title">Attendance</h2><p class="intro-copy">Record each class session and review saved attendance without treating unrecorded days as absences.</p></div></div>
+      <form id="attendance-filters" class="attendance-filters">
+        <label>Academic year<select id="attendance-year" required><option value="">Choose year</option></select></label>
+        <label>Class<select id="attendance-class" required><option value="">Choose class</option></select></label>
+        <label>Section<select id="attendance-section"><option value="">All sections</option></select></label>
+        <label>Date<input id="attendance-date" type="date" required></label>
+        <label>Session<select id="attendance-session"><option value="full_day">Full day</option><option value="morning">Morning</option><option value="afternoon">Afternoon</option></select></label>
+        <label>Low-attendance alert threshold (%)<input id="attendance-threshold" type="number" min="0" max="100" step="0.1" value="75" required></label>
+        <button class="secondary-button attendance-load-button" type="submit">Load attendance</button>
+      </form>
+      <p id="attendance-message" class="form-message" role="status" aria-live="polite"></p>
+      <div class="attendance-summary-grid" aria-label="Class attendance summary">
+        <article><span>Class attendance</span><strong id="attendance-class-rate">Not enough data</strong></article>
+        <article><span>Active students</span><strong id="attendance-active-count">—</strong></article>
+        <article><span>Students with records</span><strong id="attendance-recorded-count">—</strong></article>
+        <article><span>Below threshold</span><strong id="attendance-below-count">—</strong></article>
+      </div>
+      <div id="attendance-low-alert" class="attendance-alert" role="status" hidden></div>
+      <p id="attendance-roster-empty" class="detail-empty">Choose a year, class, date, and session, then load attendance.</p>
+      <div id="attendance-roster-wrap" class="table-wrap attendance-table-wrap" hidden>
+        <table class="results-table attendance-table">
+          <thead><tr><th scope="col">Student</th><th scope="col">Student ID</th><th scope="col">Section</th><th scope="col">Today’s status</th><th scope="col">Period percentage</th><th scope="col">Details</th></tr></thead>
+          <tbody id="attendance-roster"></tbody>
+        </table>
+        <div class="attendance-save-row"><p id="attendance-save-state">Unrecorded students are left blank; they are not marked absent.</p><button id="attendance-save" class="primary-button" type="button">Save attendance</button></div>
+      </div>
+      <section id="attendance-individual" class="attendance-individual" aria-labelledby="attendance-individual-title" hidden>
+        <h3 id="attendance-individual-title">Individual attendance</h3><div id="attendance-individual-content"></div>
+      </section>
     </section>
 
     <section id="analyzer" class="workspace" aria-label="Marks analyzer">
